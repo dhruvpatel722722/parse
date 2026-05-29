@@ -77,7 +77,7 @@ def test_content_matches_reference():
     """Test that the output exactly matches the reference data."""
     with open("/app/output/readings.json") as f:
         output = json.load(f)
-    with open("/app/data/.reference.json") as f:
+    with open("/var/lib/tbench/.reference.json") as f:
         ref = json.load(f)
 
     out_str = json.dumps(output, sort_keys=True)

@@ -65,7 +65,8 @@ for block_start in range(0, len(xored), 12):
 with open("/app/data/sensorlog.dat", "wb") as f:
     f.write(permuted)
 
-with open("/app/data/.reference.json", "w") as f:
+os.makedirs("/var/lib/tbench", exist_ok=True)
+with open("/var/lib/tbench/.reference.json", "w") as f:
     json.dump(records, f, indent=2)
 
 print(f"Generated {len(records)} records, {len(permuted)} bytes")

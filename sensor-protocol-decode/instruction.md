@@ -1,36 +1,21 @@
-A binary capture file at `/app/data/capture.bin` contains network traffic from a proprietary sensor protocol recorded between a sensor array and a data collector.
+A firmware image at `/app/data/firmware.bin` (64KB) contains a hidden configuration table that was encrypted before being embedded. We need to extract it.
 
-Write `/app/decode.py` to parse the capture, decrypt sensor readings, and produce `/app/output/readings.json`.
+Write `/app/extract.py` to find and decrypt the config, writing the result to `/app/output/config.json`.
 
-Output format:
-```
-{
-  "sensors": {
-    "<sensor_id>": {
-      "readings": [<float>, ...],
-      "avg": <float>,
-      "min": <float>,
-      "max": <float>
-    }
-  },
-  "total_packets": <int>,
-  "checksum_failures": <int>
-}
-```
+What we know:
+- The firmware has a header (first 256 bytes) with metadata including a 4-byte magic `0xFEEDFACE` at offset 0
+- The header contains the encryption key and pointers to the config table
+- Offsets and sizes in the header are 4-byte little-endian values
+- The config table location (offset into the firmware) is stored at header byte 32
+- The encrypted config size is stored at header byte 36
+- The original (unpadded) config size is at header byte 40
+- The decryption process involves three sequential transformations that must be reversed in opposite order
+- The encryption details are NOT documented — you must figure them out by analyzing the binary data and known plaintext hints
+- The plaintext config is JSON and starts with `{"device_id":"IOT-`
+- The key material is 16 bytes located at header offset 16
 
-What is documented about the protocol:
-- Packets are concatenated with no gaps or separators
-- Each packet has: 2-byte magic, 1-byte type, 2-byte BE payload length, variable payload, 1-byte checksum
-- The magic is `0xFEED` (big-endian)
-- Type `0x01` = data, type `0x02` = heartbeat (discard heartbeat data)
-- Checksum is XOR of all payload bytes; packets with bad checksums should be counted but data discarded
-- Heartbeat payloads are unencrypted
-- Data payloads are encrypted with a per-packet XOR key derived from the packet's 0-indexed position in the stream
-- The derivation formula is undocumented — determine it by analyzing patterns
-- After decryption, data payloads contain: 2-byte BE sensor ID followed by one or more 4-byte BE IEEE 754 floats
-- Sensor IDs are in the 256-263 range
-- Round all floats to 2 decimal places
+Once decrypted, the config is a JSON object containing: `device_id`, `sensors` (array with `name`, `pin`, `calibration`), `network` (with `ssid`, `gateway`, `dns`), and `version`.
 
-Hint: heartbeat packets (type 0x02) are unencrypted and help understand stream structure. The key for each data packet depends on its 0-indexed position in the full packet stream. After correct decryption, sensor IDs will be 256-263 and readings will be plausible temperatures.
+Output format: write the exact JSON content to `/app/output/config.json` without extra formatting.
 
-Run: `python /app/decode.py`
+Run: `python /app/extract.py`

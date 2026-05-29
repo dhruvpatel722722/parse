@@ -1,101 +1,63 @@
 #!/bin/bash
-cat > /app/decode.py << 'PYTHON'
+cat > /app/extract.py << 'PYTHON'
 import struct
 import json
 import os
 
-def decode_capture():
-    with open("/app/data/capture.bin", "rb") as f:
-        data = f.read()
+def main():
+    with open("/app/data/firmware.bin", "rb") as f:
+        firmware = f.read()
     
-    pos = 0
-    packet_number = 0
-    sensors = {}
-    checksum_failures = 0
-    total_packets = 0
+    # Parse header
+    magic = firmware[0:4]
+    assert magic == b'\xFE\xED\xFA\xCE', f"Bad magic: {magic.hex()}"
     
-    while pos < len(data):
-        # Read magic
-        if pos + 2 > len(data):
-            break
-        magic = data[pos:pos+2]
-        if magic != b'\xFE\xED':
-            break
-        pos += 2
-        
-        # Read type
-        ptype = data[pos]
-        pos += 1
-        
-        # Read length
-        length = struct.unpack_from('>H', data, pos)[0]
-        pos += 2
-        
-        # Read payload
-        payload_enc = data[pos:pos+length]
-        pos += length
-        
-        # Read checksum
-        checksum_expected = data[pos]
-        pos += 1
-        
-        total_packets += 1
-        
-        # Verify checksum
-        checksum_actual = 0
-        for b in payload_enc:
-            checksum_actual ^= b
-        
-        if checksum_actual != checksum_expected:
-            checksum_failures += 1
-            packet_number += 1
-            continue
-        
-        # Skip heartbeats
-        if ptype == 0x02:
-            packet_number += 1
-            continue
-        
-        # Decrypt data payload
-        key = (packet_number * 37 + 13) & 0xFF
-        payload_plain = bytes(b ^ key for b in payload_enc)
-        
-        # Parse: 2-byte sensor ID + 4-byte floats
-        sensor_id = struct.unpack_from('>H', payload_plain, 0)[0]
-        num_floats = (len(payload_plain) - 2) // 4
-        
-        sid_str = str(sensor_id)
-        if sid_str not in sensors:
-            sensors[sid_str] = {"readings": []}
-        
-        for i in range(num_floats):
-            val = struct.unpack_from('>f', payload_plain, 2 + i*4)[0]
-            sensors[sid_str]["readings"].append(round(val, 2))
-        
-        packet_number += 1
+    # Master key at offset 16 (16 bytes)
+    master_key = firmware[16:32]
     
-    # Compute stats
-    for sid_str, sdata in sensors.items():
-        r = sdata["readings"]
-        sdata["avg"] = round(sum(r) / len(r), 2)
-        sdata["min"] = round(min(r), 2)
-        sdata["max"] = round(max(r), 2)
+    # Config offset and sizes at bytes 32-43
+    config_offset = struct.unpack_from('<I', firmware, 32)[0]
+    config_enc_size = struct.unpack_from('<I', firmware, 36)[0]
+    config_orig_size = struct.unpack_from('<I', firmware, 40)[0]
     
-    result = {
-        "sensors": sensors,
-        "total_packets": total_packets,
-        "checksum_failures": checksum_failures,
-    }
+    # Extract encrypted blob
+    blob = bytearray(firmware[config_offset:config_offset + config_enc_size])
+    
+    # Reverse Layer 3: Un-swap adjacent byte pairs
+    unswapped = bytearray(len(blob))
+    for i in range(0, len(blob) - 1, 2):
+        unswapped[i] = blob[i+1]
+        unswapped[i+1] = blob[i]
+    if len(blob) % 2 == 1:
+        unswapped[-1] = blob[-1]
+    
+    # Reverse Layer 2: Rotate each 8-byte block RIGHT by (block_index % 5)
+    unrotated = bytearray(len(unswapped))
+    for block_idx in range(len(unswapped) // 8):
+        block = unswapped[block_idx*8:(block_idx+1)*8]
+        shift = block_idx % 5
+        # Reverse of left rotation by N is right rotation by N
+        unrotated_block = block[8-shift:] + block[:8-shift]
+        unrotated[block_idx*8:(block_idx+1)*8] = unrotated_block
+    
+    # Reverse Layer 1: XOR with repeating master key
+    decrypted = bytearray(len(unrotated))
+    for i in range(len(unrotated)):
+        decrypted[i] = unrotated[i] ^ master_key[i % 16]
+    
+    # Trim to original size and parse
+    config_bytes = decrypted[:config_orig_size]
+    config = json.loads(config_bytes.decode('utf-8'))
     
     os.makedirs("/app/output", exist_ok=True)
-    with open("/app/output/readings.json", "w") as f:
-        json.dump(result, f, indent=2)
+    with open("/app/output/config.json", "w") as f:
+        json.dump(config, f, separators=(',', ':'))
     
-    print(f"Decoded {total_packets} packets, {checksum_failures} checksum failures")
-    print(f"Sensors: {len(sensors)}")
+    print(f"Extracted config: {len(config_bytes)} bytes")
+    print(f"Device: {config.get('device_id')}")
 
 if __name__ == "__main__":
-    decode_capture()
+    main()
 PYTHON
 
-python /app/decode.py
+python /app/extract.py

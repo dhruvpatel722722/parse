@@ -3,112 +3,90 @@ import os
 import hashlib
 
 
-def test_decode_script_exists():
-    """Test that the decode script was created at the expected path."""
-    assert os.path.exists("/app/decode.py"), "decode.py does not exist"
+def test_extract_script_exists():
+    """Test that the extraction script was created."""
+    assert os.path.exists("/app/extract.py"), "extract.py does not exist"
 
 
 def test_output_file_exists():
-    """Test that the decoded readings JSON output was produced."""
-    assert os.path.exists("/app/output/readings.json"), "readings.json does not exist"
+    """Test that the config JSON output was produced."""
+    assert os.path.exists("/app/output/config.json"), "config.json does not exist"
 
 
 def test_output_is_valid_json():
-    """Test that the output file contains valid parseable JSON."""
-    with open("/app/output/readings.json") as f:
+    """Test that the output is valid parseable JSON."""
+    with open("/app/output/config.json") as f:
         data = json.load(f)
     assert isinstance(data, dict), "Output should be a JSON object"
 
 
-def test_output_has_required_keys():
-    """Test that the output contains sensors, total_packets, and checksum_failures."""
-    with open("/app/output/readings.json") as f:
+def test_has_required_keys():
+    """Test that the config has device_id, sensors, network, and version fields."""
+    with open("/app/output/config.json") as f:
         data = json.load(f)
-    required = {"sensors", "total_packets", "checksum_failures"}
+    required = {"device_id", "sensors", "network", "version"}
     missing = required - set(data.keys())
-    assert not missing, f"Output missing keys: {missing}"
+    assert not missing, f"Config missing keys: {missing}"
 
 
-def test_total_packets_matches():
-    """Test that the total packet count matches the reference."""
-    with open("/app/output/readings.json") as f:
-        output = json.load(f)
+def test_device_id():
+    """Test that the extracted device_id matches the reference."""
+    with open("/app/output/config.json") as f:
+        data = json.load(f)
     with open("/app/data/.reference.json") as f:
         ref = json.load(f)
-    assert output["total_packets"] == ref["total_packets"], (
-        f"total_packets: got {output['total_packets']}, expected {ref['total_packets']}"
+    assert data["device_id"] == ref["device_id"], (
+        f"device_id mismatch: got '{data['device_id']}'"
     )
 
 
-def test_checksum_failures_matches():
-    """Test that the checksum failure count matches the reference."""
-    with open("/app/output/readings.json") as f:
-        output = json.load(f)
+def test_sensors_count_and_structure():
+    """Test that all sensors are present with correct fields."""
+    with open("/app/output/config.json") as f:
+        data = json.load(f)
     with open("/app/data/.reference.json") as f:
         ref = json.load(f)
-    assert output["checksum_failures"] == ref["checksum_failures"], (
-        f"checksum_failures: got {output['checksum_failures']}, expected {ref['checksum_failures']}"
+    assert len(data["sensors"]) == len(ref["sensors"]), (
+        f"Sensor count: got {len(data['sensors'])}, expected {len(ref['sensors'])}"
+    )
+    for i, (s, r) in enumerate(zip(data["sensors"], ref["sensors"])):
+        assert s["name"] == r["name"], f"Sensor {i} name mismatch"
+        assert s["pin"] == r["pin"], f"Sensor {i} pin mismatch"
+        assert abs(s["calibration"] - r["calibration"]) < 0.001, f"Sensor {i} calibration mismatch"
+
+
+def test_network_config():
+    """Test that network configuration matches the reference."""
+    with open("/app/output/config.json") as f:
+        data = json.load(f)
+    with open("/app/data/.reference.json") as f:
+        ref = json.load(f)
+    assert data["network"] == ref["network"], (
+        f"Network mismatch: got {data['network']}"
     )
 
 
-def test_sensor_count():
-    """Test that the correct number of sensors were decoded."""
-    with open("/app/output/readings.json") as f:
-        output = json.load(f)
+def test_version():
+    """Test that the firmware version string matches."""
+    with open("/app/output/config.json") as f:
+        data = json.load(f)
     with open("/app/data/.reference.json") as f:
         ref = json.load(f)
-    assert len(output["sensors"]) == len(ref["sensors"]), (
-        f"Sensor count: got {len(output['sensors'])}, expected {len(ref['sensors'])}"
+    assert data["version"] == ref["version"], (
+        f"Version mismatch: got '{data['version']}', expected '{ref['version']}'"
     )
 
 
-def test_sensor_readings_match():
-    """Test that all sensor readings exactly match the reference values."""
-    with open("/app/output/readings.json") as f:
+def test_output_matches_reference_hash():
+    """Test that the full output matches the reference via canonical hash."""
+    with open("/app/output/config.json") as f:
         output = json.load(f)
     with open("/app/data/.reference.json") as f:
         ref = json.load(f)
     
-    for sid, ref_data in ref["sensors"].items():
-        assert sid in output["sensors"], f"Missing sensor {sid}"
-        out_data = output["sensors"][sid]
-        assert out_data["readings"] == ref_data["readings"], (
-            f"Sensor {sid} readings mismatch: got {len(out_data['readings'])} values, "
-            f"expected {len(ref_data['readings'])}"
-        )
-
-
-def test_sensor_stats_match():
-    """Test that avg, min, max statistics for each sensor are correct."""
-    with open("/app/output/readings.json") as f:
-        output = json.load(f)
-    with open("/app/data/.reference.json") as f:
-        ref = json.load(f)
+    out_str = json.dumps(output, sort_keys=True)
+    ref_str = json.dumps(ref, sort_keys=True)
     
-    for sid, ref_data in ref["sensors"].items():
-        out_data = output["sensors"][sid]
-        assert abs(out_data["avg"] - ref_data["avg"]) < 0.01, (
-            f"Sensor {sid} avg: got {out_data['avg']}, expected {ref_data['avg']}"
-        )
-        assert abs(out_data["min"] - ref_data["min"]) < 0.01, (
-            f"Sensor {sid} min: got {out_data['min']}, expected {ref_data['min']}"
-        )
-        assert abs(out_data["max"] - ref_data["max"]) < 0.01, (
-            f"Sensor {sid} max: got {out_data['max']}, expected {ref_data['max']}"
-        )
-
-
-def test_output_hash_matches_reference():
-    """Test that the full output content matches the reference via hash comparison."""
-    with open("/app/output/readings.json") as f:
-        output = json.load(f)
-    with open("/app/data/.reference.json") as f:
-        ref = json.load(f)
-    
-    out_canonical = json.dumps(output, sort_keys=True)
-    ref_canonical = json.dumps(ref, sort_keys=True)
-    
-    out_hash = hashlib.sha256(out_canonical.encode()).hexdigest()
-    ref_hash = hashlib.sha256(ref_canonical.encode()).hexdigest()
-    
-    assert out_hash == ref_hash, "Output does not match reference (hash mismatch)"
+    assert hashlib.sha256(out_str.encode()).hexdigest() == hashlib.sha256(ref_str.encode()).hexdigest(), (
+        "Output does not match reference"
+    )

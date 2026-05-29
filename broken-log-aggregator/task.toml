@@ -4,10 +4,10 @@ version = "1.0"
 author_name = "unknown"
 author_email = "unknown"
 difficulty = "hard"
-category = "software-engineering"
-tags = [ "coding", "optimization", "python" ]
+category = "data-processing"
+tags = [ "coding", "compression", "algorithms", "python" ]
 expert_time_estimate_min = 60
-junior_time_estimate_min = 240
+junior_time_estimate_min = 300
 
 [verifier]
 timeout_sec = 900.0

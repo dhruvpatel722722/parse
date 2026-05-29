@@ -1,138 +1,113 @@
-import json
 import os
 import subprocess
+import hashlib
 import sys
+import importlib
 
 
-def test_bench_result_exists():
-    """Test that the benchmark result file was created."""
-    assert os.path.exists("/app/output/bench_result.json"), "Benchmark result file does not exist"
+def test_compress_script_exists():
+    """Test that the compression script was created at the expected path."""
+    assert os.path.exists("/app/compress.py"), "compress.py does not exist"
 
 
-def test_bench_result_valid_json():
-    """Test that the benchmark result is valid JSON."""
-    with open("/app/output/bench_result.json") as f:
-        data = json.load(f)
-    assert isinstance(data, dict), "Result should be a JSON object"
+def test_decompress_script_exists():
+    """Test that the decompression script was created at the expected path."""
+    assert os.path.exists("/app/decompress.py"), "decompress.py does not exist"
 
 
-def test_benchmark_passed():
-    """Test that the benchmark completed under the 2.0 second time limit."""
-    with open("/app/output/bench_result.json") as f:
-        data = json.load(f)
-    assert data["passed"] is True, (
-        f"Benchmark did not pass: took {data['total_time_seconds']}s (limit: 2.0s)"
+def test_compressed_file_exists():
+    """Test that the compressed output file was produced."""
+    assert os.path.exists("/app/output/compressed.bin"), "compressed.bin does not exist"
+
+
+def test_restored_file_exists():
+    """Test that the decompressed restored file was produced."""
+    assert os.path.exists("/app/output/restored.bin"), "restored.bin does not exist"
+
+
+def test_compression_ratio():
+    """Test that the compression ratio exceeds 2.5x (compressed < 40% of original)."""
+    orig_size = os.path.getsize("/app/data/corpus.bin")
+    comp_size = os.path.getsize("/app/output/compressed.bin")
+    ratio = orig_size / comp_size
+    threshold = orig_size * 0.4
+    assert comp_size < threshold, (
+        f"Compressed size {comp_size} is not < 40% of original {orig_size} "
+        f"(ratio: {ratio:.2f}x, need > 2.5x)"
     )
 
 
-def test_benchmark_time_under_limit():
-    """Test that total execution time is strictly below the 2 second threshold."""
-    with open("/app/output/bench_result.json") as f:
-        data = json.load(f)
-    assert data["total_time_seconds"] < 2.0, (
-        f"Total time {data['total_time_seconds']}s exceeds 2.0s limit"
+def test_lossless_decompression():
+    """Test that decompression produces a byte-for-byte identical file to the original."""
+    with open("/app/data/corpus.bin", "rb") as f:
+        original = f.read()
+    with open("/app/output/restored.bin", "rb") as f:
+        restored = f.read()
+    assert len(restored) == len(original), (
+        f"Size mismatch: original {len(original)} vs restored {len(restored)}"
+    )
+    assert original == restored, "Decompressed file differs from original"
+
+
+def test_decompression_hash_match():
+    """Test that SHA-256 hash of restored file matches the original corpus."""
+    def file_hash(path):
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            while chunk := f.read(8192):
+                h.update(chunk)
+        return h.hexdigest()
+    
+    orig_hash = file_hash("/app/data/corpus.bin")
+    rest_hash = file_hash("/app/output/restored.bin")
+    assert orig_hash == rest_hash, (
+        f"Hash mismatch: original={orig_hash[:16]}... restored={rest_hash[:16]}..."
     )
 
 
-def test_all_queries_executed():
-    """Test that all 20 benchmark queries were executed and produced results."""
-    with open("/app/output/bench_result.json") as f:
-        data = json.load(f)
-    assert data["num_queries"] == 20, f"Expected 20 queries, got {data['num_queries']}"
-    assert len(data["query_results"]) == 20, (
-        f"Expected 20 query results, got {len(data['query_results'])}"
-    )
-
-
-def test_query_results_have_correct_counts():
-    """Test that each query returned the expected number of results."""
-    with open("/app/output/bench_result.json") as f:
-        data = json.load(f)
-    for qr in data["query_results"]:
-        assert qr["num_results"] >= 0, f"Query {qr['query_index']} has negative result count"
-        assert isinstance(qr["hash"], str) and len(qr["hash"]) == 16, (
-            f"Query {qr['query_index']} has invalid hash"
-        )
-
-
-def test_results_correctness_via_rerun():
-    """Test that running the benchmark again produces identical result hashes."""
-    sys.path.insert(0, "/app/engine")
+def test_compress_runs_within_time_limit():
+    """Test that the compression script completes within 30 seconds."""
     result = subprocess.run(
-        [sys.executable, "/app/engine/bench.py"],
-        capture_output=True, text=True, timeout=10
+        [sys.executable, "/app/compress.py"],
+        capture_output=True, text=True, timeout=30
     )
-    assert result.returncode == 0, f"Benchmark rerun failed: {result.stderr}"
-    
-    with open("/app/output/bench_result.json") as f:
-        data = json.load(f)
-    
-    assert data["passed"] is True, (
-        f"Benchmark rerun did not pass: {data['total_time_seconds']}s"
+    assert result.returncode == 0, f"compress.py failed: {result.stderr}"
+
+
+def test_decompress_runs_within_time_limit():
+    """Test that the decompression script completes within 30 seconds."""
+    result = subprocess.run(
+        [sys.executable, "/app/decompress.py"],
+        capture_output=True, text=True, timeout=30
     )
+    assert result.returncode == 0, f"decompress.py failed: {result.stderr}"
 
 
-def test_result_hashes_match_reference():
-    """Test that optimized query results match the reference hashes from correct execution."""
-    with open("/app/output/bench_result.json") as f:
-        data = json.load(f)
-    
-    # These hashes are computed from the correct unoptimized execution
-    # They verify the optimized version produces identical results
-    reference_hashes = {}
-    sys.path.insert(0, "/app/engine")
-    
-    # Run a fresh benchmark to get current hashes
-    from query import QueryEngine
-    import hashlib
-    
-    QUERIES = [
-        {"tags_all": ["python", "docker"], "sort_by": "score", "sort_desc": True, "limit": 100},
-        {"tags_all": ["rust", "linux"], "sort_by": "timestamp", "limit": 50},
-        {"tags_all": ["javascript", "web", "api"], "sort_by": "score", "limit": 20},
-        {"tags_any": ["kubernetes", "docker", "devops"], "min_score": 50, "sort_by": "score", "sort_desc": True, "limit": 200},
-        {"tags_any": ["python", "rust", "go"], "max_score": 30, "sort_by": "timestamp", "limit": 150},
-        {"min_score": 80, "max_score": 100, "sort_by": "score", "sort_desc": True, "limit": 500},
-        {"min_score": 0, "max_score": 10, "sort_by": "timestamp", "sort_desc": True, "limit": 100},
-        {"start_time": "2024-06-01T00:00:00Z", "end_time": "2024-06-30T23:59:00Z", "sort_by": "score", "sort_desc": True, "limit": 100},
-        {"start_time": "2024-01-01T00:00:00Z", "end_time": "2024-03-31T23:59:00Z", "tags_any": ["python", "java"], "sort_by": "timestamp", "limit": 200},
-        {"tags_all": ["python"], "min_score": 60, "start_time": "2024-03-01T00:00:00Z", "end_time": "2024-09-30T23:59:00Z", "sort_by": "score", "sort_desc": True, "limit": 50},
-        {"tags_any": ["security", "testing"], "min_score": 40, "max_score": 80, "sort_by": "timestamp", "sort_desc": True, "limit": 100, "offset": 50},
-        {"tags_all": ["go", "api"], "max_score": 70, "sort_by": "title", "limit": 30},
-        {"tags_any": ["python", "java", "javascript", "typescript"], "sort_by": "score", "sort_desc": True, "limit": 100, "offset": 500},
-        {"min_score": 20, "max_score": 80, "sort_by": "timestamp", "limit": 50, "offset": 1000},
-        {"tags_any": ["docker", "kubernetes", "aws"], "sort_by": "score", "limit": 200, "offset": 200},
-        {"tags_all": ["python", "docker"], "sort_by": "score", "sort_desc": True, "limit": 100},
-        {"tags_any": ["kubernetes", "docker", "devops"], "min_score": 50, "sort_by": "score", "sort_desc": True, "limit": 200},
-        {"min_score": 80, "max_score": 100, "sort_by": "score", "sort_desc": True, "limit": 500},
-        {"tags_all": ["python", "security", "testing"], "sort_by": "score", "sort_desc": True, "limit": 10},
-        {"tags_all": ["rust", "kubernetes"], "min_score": 70, "sort_by": "timestamp", "limit": 20},
-    ]
-    
-    engine = QueryEngine()
-    for i, query in enumerate(QUERIES):
-        result = engine.execute(query)
-        canonical = json.dumps(result, sort_keys=True, default=str)
-        h = hashlib.sha256(canonical.encode()).hexdigest()[:16]
-        stored_hash = data["query_results"][i]["hash"]
-        assert h == stored_hash, (
-            f"Query {i} hash mismatch: got {h}, stored {stored_hash}. Results differ!"
-        )
+def test_no_banned_imports_in_compress():
+    """Test that compress.py does not use banned compression libraries."""
+    with open("/app/compress.py", "r") as f:
+        source = f.read()
+    banned = ["zlib", "gzip", "lzma", "bz2", "snappy", "zstandard", "lz4", "brotli"]
+    for lib in banned:
+        assert lib not in source, f"Banned library '{lib}' found in compress.py"
 
 
-def test_engine_files_exist():
-    """Test that the optimized engine files exist at the expected paths."""
-    assert os.path.exists("/app/engine/index.py"), "index.py missing"
-    assert os.path.exists("/app/engine/query.py"), "query.py missing"
+def test_no_banned_imports_in_decompress():
+    """Test that decompress.py does not use banned compression libraries."""
+    with open("/app/decompress.py", "r") as f:
+        source = f.read()
+    banned = ["zlib", "gzip", "lzma", "bz2", "snappy", "zstandard", "lz4", "brotli"]
+    for lib in banned:
+        assert lib not in source, f"Banned library '{lib}' found in decompress.py"
 
 
-def test_bench_not_modified():
-    """Test that bench.py was not tampered with by checking its content hash."""
-    import hashlib
-    with open("/app/engine/bench.py", "rb") as f:
-        content = f.read()
-    h = hashlib.sha256(content).hexdigest()[:16]
-    # This hash is set during environment setup and should not change
-    with open("/app/data/.bench_hash", "r") as f:
-        expected = f.read().strip()
-    assert h == expected, "bench.py has been modified (not allowed)"
+def test_no_shell_compression_tools():
+    """Test that scripts do not shell out to system compression utilities."""
+    for script in ["/app/compress.py", "/app/decompress.py"]:
+        with open(script, "r") as f:
+            source = f.read()
+        shell_tools = ["subprocess", "os.system", "os.popen", "Popen"]
+        for tool in shell_tools:
+            assert tool not in source, (
+                f"Shell execution '{tool}' found in {script} - not allowed"
+            )

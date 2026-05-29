@@ -1,28 +1,25 @@
-There's a slow query engine at `/app/engine/` that processes search queries against an in-memory dataset. It works correctly but is too slow.
+There's a dataset at `/app/data/corpus.bin` (a binary file, roughly 1MB). You need to write a custom compressor and decompressor for it.
 
-Run it with: `python /app/engine/bench.py`
+Create two scripts:
+- `/app/compress.py` — reads `/app/data/corpus.bin`, writes compressed output to `/app/output/compressed.bin`
+- `/app/decompress.py` — reads `/app/output/compressed.bin`, writes decompressed output to `/app/output/restored.bin`
 
-It will execute a benchmark of queries and report timing. Your task is to optimize the engine so the full benchmark completes in under 2.0 seconds while still producing correct results.
+Requirements:
+1. The compressed file must be smaller than 40% of the original size (compression ratio > 2.5x)
+2. Decompression must be perfectly lossless — the restored file must be byte-for-byte identical to the original
+3. Both scripts must complete within 30 seconds each
+4. You may NOT use any external compression libraries (no zlib, gzip, lzma, bz2, snappy, zstandard, etc.) — implement the algorithm yourself from scratch using only Python standard library (struct, collections, heapq, array, io, os, sys are fine)
+5. You may NOT shell out to system compression tools
 
-The engine has these files:
-- `bench.py` — benchmark runner (do not modify)
-- `index.py` — builds the search index from raw data
-- `query.py` — executes queries against the index
-- `data.py` — loads the dataset
+After creating both scripts, run them in sequence:
+```
+python /app/compress.py
+python /app/decompress.py
+```
 
-The dataset at `/app/data/records.json` contains 200,000 records with fields: `id`, `title`, `tags`, `score`, `timestamp`. The benchmark runs queries that:
-1. Filter by tag combinations (AND/OR logic)
-2. Filter by score ranges
-3. Filter by timestamp ranges
-4. Sort results by different fields
-5. Apply pagination (offset + limit)
+Verify your output by comparing the files:
+```
+cmp /app/data/corpus.bin /app/output/restored.bin
+```
 
-Current performance is around 15-25 seconds for the full benchmark. You need to get it under 2.0 seconds.
-
-Constraints:
-- You must NOT modify `bench.py` or `/app/data/records.json`
-- The query results must remain identical (same records, same order)
-- All optimizations must be in `index.py` and/or `query.py`
-- Write your optimized files to `/app/engine/index.py` and `/app/engine/query.py`
-
-After optimizing, run the benchmark again to verify it passes. The benchmark writes results to `/app/output/bench_result.json`.
+The corpus contains structured English text with repeating patterns. Choose your compression strategy accordingly.

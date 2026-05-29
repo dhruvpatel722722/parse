@@ -1,279 +1,126 @@
 #!/bin/bash
-# Implement LZ77 + Huffman compression
+# Recover scrambled database by determining the block permutation
 
-cat > /app/compress.py << 'PYTHON'
+cat > /app/recover.py << 'PYTHON'
 import struct
-import heapq
+import json
+import os
+import hashlib
 from collections import Counter
-import os
 
-def lz77_compress(data, window_size=8192, min_match=3, max_match=258):
-    """LZ77 compression with hash-chain for fast matching."""
-    tokens = []
-    i = 0
-    n = len(data)
+def reconstruct_expected_frames(num_frames=50):
+    """Reconstruct what the original frames should look like."""
+    WORDS = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta",
+             "iota", "kappa", "lambda", "mu", "nu", "xi", "omicron", "pi",
+             "rho", "sigma", "tau", "upsilon", "phi", "chi", "psi", "omega",
+             "config", "server", "client", "cache", "queue", "index", "route", "token"]
     
-    # Hash table: 3-byte hash -> list of positions
-    from collections import defaultdict
-    hash_chains = defaultdict(list)
-    
-    while i < n:
-        best_offset = 0
-        best_length = 0
+    frames = []
+    for i in range(num_frames):
+        prefix = WORDS[i % len(WORDS)]
+        suffix = WORDS[(i * 7 + 3) % len(WORDS)]
+        key_str = f"{prefix}.{suffix}.{i:03d}"
+        val_words = [WORDS[(i * 11 + j * 5) % len(WORDS)] for j in range(4)]
+        value = f"data={'.'.join(val_words)} seq={i:04d} hash={hashlib.md5(str(i).encode()).hexdigest()[:8]}"
         
-        if i + 2 < n:
-            # Hash of 3 bytes at current position
-            h = (data[i] << 16) | (data[i+1] << 8) | data[i+2]
+        frame = bytearray(128)
+        struct.pack_into('<I', frame, 0, i)
+        k = key_str.encode()[:32]
+        frame[4:4+len(k)] = k
+        v = value.encode()[:92]
+        frame[36:36+len(v)] = v
+        frames.append(frame)
+    
+    return frames
+
+def deduce_permutation(scrambled_data):
+    """Deduce the 16-byte block permutation using known frame content."""
+    expected_frames = reconstruct_expected_frames(50)
+    
+    # The relationship is: scrambled[PERM[i]] = original[i]
+    # To recover: original[i] = scrambled[PERM[i]]
+    # So we need to find PERM such that for each block:
+    #   scrambled_block[PERM[i]] == expected_block[i] for all i
+    
+    # Use constraint propagation across multiple blocks
+    possible = [set(range(16)) for _ in range(16)]
+    
+    for frame_idx in range(50):
+        expected_frame = expected_frames[frame_idx]
+        # Process each 16-byte block within this frame
+        for block_num in range(8):  # 128/16 = 8 blocks per frame
+            block_offset = frame_idx * 128 + block_num * 16
+            scrambled_block = scrambled_data[block_offset:block_offset+16]
+            expected_block = expected_frame[block_num*16:(block_num+1)*16]
             
-            # Search hash chain
-            chain = hash_chains[h]
-            for j in reversed(chain[-32:]):  # limit chain depth
-                if i - j > window_size:
-                    break
-                # Extend match
-                length = 0
-                while (length < max_match and 
-                       i + length < n and 
-                       data[j + length] == data[i + length]):
-                    length += 1
-                
-                if length > best_length:
-                    best_length = length
-                    best_offset = i - j
-            
-            chain.append(i)
-        
-        if best_length >= min_match:
-            tokens.append((1, best_offset, best_length))
-            # Add positions to hash for skipped bytes
-            for k in range(1, best_length):
-                if i + k + 2 < n:
-                    hk = (data[i+k] << 16) | (data[i+k+1] << 8) | data[i+k+2]
-                    hash_chains[hk].append(i + k)
-            i += best_length
-        else:
-            tokens.append((0, data[i], 0))
-            i += 1
+            # For each position i in the original:
+            # scrambled_block[PERM[i]] must equal expected_block[i]
+            for i in range(16):
+                target_val = expected_block[i]
+                valid_positions = frozenset(
+                    p for p in range(16) if scrambled_block[p] == target_val
+                )
+                possible[i] = possible[i].intersection(valid_positions)
     
-    return tokens
+    # Resolve by elimination
+    perm = [None] * 16
+    resolved = set()
+    
+    changed = True
+    while changed:
+        changed = False
+        for i in range(16):
+            remaining = possible[i] - resolved
+            if len(remaining) == 1:
+                val = next(iter(remaining))
+                if perm[i] is None:
+                    perm[i] = val
+                    resolved.add(val)
+                    changed = True
+            possible[i] = remaining
+    
+    # Verify completeness
+    if None in perm:
+        raise ValueError(f"Could not fully resolve permutation: {perm}")
+    
+    return perm
 
-def build_huffman_tree(freq):
-    """Build Huffman tree from frequency dict, return code table."""
-    if not freq:
-        return {}
-    if len(freq) == 1:
-        symbol = list(freq.keys())[0]
-        return {symbol: '0'}
+def main():
+    with open("/app/data/records.dat", "rb") as f:
+        data = bytearray(f.read())
     
-    heap = [(count, i, symbol) for i, (symbol, count) in enumerate(freq.items())]
-    heapq.heapify(heap)
+    # Deduce the permutation
+    perm = deduce_permutation(data)
     
-    nodes = {}
-    counter = len(heap)
+    # Unscramble entire file
+    unscrambled = bytearray(len(data))
+    for block_start in range(0, len(data), 16):
+        block = data[block_start:block_start+16]
+        for i in range(16):
+            unscrambled[block_start + i] = block[perm[i]]
     
-    while len(heap) > 1:
-        freq1, _, node1 = heapq.heappop(heap)
-        freq2, _, node2 = heapq.heappop(heap)
-        internal = ('internal', counter)
-        counter += 1
-        nodes[internal] = (node1, node2)
-        heapq.heappush(heap, (freq1 + freq2, counter, internal))
-        counter += 1
+    # Parse frames
+    records = []
+    for frame_idx in range(200):
+        offset = frame_idx * 128
+        rec_id = struct.unpack_from('<I', unscrambled, offset)[0]
+        key_bytes = unscrambled[offset+4:offset+36]
+        key = key_bytes.split(b'\x00')[0].decode('utf-8')
+        val_bytes = unscrambled[offset+36:offset+128]
+        value = val_bytes.split(b'\x00')[0].decode('utf-8')
+        records.append({"id": rec_id, "key": key, "value": value})
     
-    if not heap:
-        return {}
-    
-    root = heap[0][2]
-    codes = {}
-    
-    def traverse(node, code):
-        if node in nodes:
-            left, right = nodes[node]
-            traverse(left, code + '0')
-            traverse(right, code + '1')
-        else:
-            codes[node] = code if code else '0'
-    
-    traverse(root, '')
-    return codes
-
-def compress():
-    with open("/app/data/corpus.bin", "rb") as f:
-        data = f.read()
-    
-    # LZ77 encode
-    tokens = lz77_compress(data)
-    
-    # Collect symbols for Huffman
-    # Literals: 0-255, Length codes: 256+length, Offset stored separately
-    symbols = []
-    offsets = []
-    
-    for token in tokens:
-        if token[0] == 0:  # literal
-            symbols.append(token[1])
-        else:  # match
-            symbols.append(256 + token[2])  # length as symbol
-            offsets.append(token[1])
-    
-    # Huffman encode symbols
-    freq = Counter(symbols)
-    codes = build_huffman_tree(freq)
-    
-    # Encode to bits
-    bits = []
-    for sym in symbols:
-        bits.append(codes[sym])
-    bitstring = ''.join(bits)
-    
-    # Pack bits into bytes
-    padding = (8 - len(bitstring) % 8) % 8
-    bitstring += '0' * padding
-    compressed_data = bytes(int(bitstring[i:i+8], 2) for i in range(0, len(bitstring), 8))
-    
-    # Encode offsets with simple variable-length encoding
-    offset_bytes = bytearray()
-    for off in offsets:
-        if off < 128:
-            offset_bytes.append(off)
-        elif off < 16384:
-            offset_bytes.append(0x80 | (off >> 8))
-            offset_bytes.append(off & 0xFF)
-        else:
-            offset_bytes.append(0xC0 | (off >> 16))
-            offset_bytes.append((off >> 8) & 0xFF)
-            offset_bytes.append(off & 0xFF)
-    
-    # Write output
-    os.makedirs("/app/output", exist_ok=True)
-    with open("/app/output/compressed.bin", "wb") as f:
-        # Header
-        f.write(struct.pack('<I', len(data)))  # original size
-        f.write(struct.pack('<I', len(compressed_data)))  # huffman data size
-        f.write(struct.pack('<I', len(offset_bytes)))  # offset data size
-        f.write(struct.pack('<H', padding))  # bit padding
-        f.write(struct.pack('<H', len(codes)))  # num symbols in codebook
-        
-        # Codebook
-        for sym, code in sorted(codes.items()):
-            f.write(struct.pack('<H', sym))  # symbol (2 bytes)
-            f.write(struct.pack('<B', len(code)))  # code length
-            # Pack code bits
-            code_padded = code + '0' * ((8 - len(code) % 8) % 8)
-            code_bytes = bytes(int(code_padded[i:i+8], 2) for i in range(0, len(code_padded), 8))
-            f.write(struct.pack('<B', len(code_bytes)))
-            f.write(code_bytes)
-        
-        # Data
-        f.write(compressed_data)
-        f.write(bytes(offset_bytes))
-    
-    orig_size = len(data)
-    comp_size = os.path.getsize("/app/output/compressed.bin")
-    ratio = orig_size / comp_size
-    print(f"Original: {orig_size} bytes")
-    print(f"Compressed: {comp_size} bytes")
-    print(f"Ratio: {ratio:.2f}x")
-
-if __name__ == "__main__":
-    compress()
-PYTHON
-
-cat > /app/decompress.py << 'PYTHON'
-import struct
-import os
-
-def decompress():
-    with open("/app/output/compressed.bin", "rb") as f:
-        # Read header
-        orig_size = struct.unpack('<I', f.read(4))[0]
-        huff_data_size = struct.unpack('<I', f.read(4))[0]
-        offset_data_size = struct.unpack('<I', f.read(4))[0]
-        padding = struct.unpack('<H', f.read(2))[0]
-        num_symbols = struct.unpack('<H', f.read(2))[0]
-        
-        # Read codebook
-        codes = {}
-        for _ in range(num_symbols):
-            sym = struct.unpack('<H', f.read(2))[0]
-            code_len = struct.unpack('<B', f.read(1))[0]
-            num_code_bytes = struct.unpack('<B', f.read(1))[0]
-            code_bytes = f.read(num_code_bytes)
-            # Extract code bits
-            bits = ''.join(f'{b:08b}' for b in code_bytes)[:code_len]
-            codes[bits] = sym
-        
-        # Read compressed data
-        huff_data = f.read(huff_data_size)
-        offset_data = f.read(offset_data_size)
-    
-    # Decode Huffman
-    bitstring = ''.join(f'{b:08b}' for b in huff_data)
-    if padding > 0:
-        bitstring = bitstring[:-padding]
-    
-    symbols = []
-    current = ''
-    for bit in bitstring:
-        current += bit
-        if current in codes:
-            symbols.append(codes[current])
-            current = ''
-    
-    # Decode offsets
-    offsets = []
-    oi = 0
-    while oi < len(offset_data):
-        b = offset_data[oi]
-        if b < 0x80:
-            offsets.append(b)
-            oi += 1
-        elif b < 0xC0:
-            off = ((b & 0x3F) << 8) | offset_data[oi + 1]
-            offsets.append(off)
-            oi += 2
-        else:
-            off = ((b & 0x3F) << 16) | (offset_data[oi + 1] << 8) | offset_data[oi + 2]
-            offsets.append(off)
-            oi += 3
-    
-    # Reconstruct data
-    output = bytearray()
-    offset_idx = 0
-    
-    for sym in symbols:
-        if sym < 256:  # literal
-            output.append(sym)
-        else:  # match reference
-            length = sym - 256
-            offset = offsets[offset_idx]
-            offset_idx += 1
-            start = len(output) - offset
-            for k in range(length):
-                output.append(output[start + k])
-    
-    # Trim to original size
-    output = output[:orig_size]
+    records.sort(key=lambda r: r["id"])
     
     os.makedirs("/app/output", exist_ok=True)
-    with open("/app/output/restored.bin", "wb") as f:
-        f.write(output)
+    with open("/app/output/recovered.json", "w") as f:
+        json.dump(records, f, indent=2)
     
-    print(f"Decompressed: {len(output)} bytes")
+    print(f"Recovered {len(records)} records")
+    print(f"First: id={records[0]['id']} key={records[0]['key']}")
 
 if __name__ == "__main__":
-    decompress()
+    main()
 PYTHON
 
-# Run compression
-python /app/compress.py
-
-# Run decompression
-python /app/decompress.py
-
-# Verify
-if cmp -s /app/data/corpus.bin /app/output/restored.bin; then
-    echo "Verification: PASSED (files are identical)"
-else
-    echo "Verification: FAILED"
-fi
+python /app/recover.py

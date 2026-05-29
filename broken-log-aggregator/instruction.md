@@ -1,25 +1,22 @@
-There's a dataset at `/app/data/corpus.bin` (a binary file, roughly 1MB). You need to write a custom compressor and decompressor for it.
+There's a scrambled database dump at `/app/data/records.dat`. It was exported from a key-value store but something went wrong during the export — the records are mangled.
 
-Create two scripts:
-- `/app/compress.py` — reads `/app/data/corpus.bin`, writes compressed output to `/app/output/compressed.bin`
-- `/app/decompress.py` — reads `/app/output/compressed.bin`, writes decompressed output to `/app/output/restored.bin`
+Your job is to write a recovery script at `/app/recover.py` that:
+1. Reads `/app/data/records.dat`
+2. Figures out how the data was scrambled
+3. Recovers the original records
+4. Writes the recovered data to `/app/output/recovered.json`
 
-Requirements:
-1. The compressed file must be smaller than 40% of the original size (compression ratio > 2.5x)
-2. Decompression must be perfectly lossless — the restored file must be byte-for-byte identical to the original
-3. Both scripts must complete within 30 seconds each
-4. You may NOT use any external compression libraries (no zlib, gzip, lzma, bz2, snappy, zstandard, etc.) — implement the algorithm yourself from scratch using only Python standard library (struct, collections, heapq, array, io, os, sys are fine)
-5. You may NOT shell out to system compression tools
+The output must be a JSON array of objects, each with keys `id` (integer), `key` (string), and `value` (string), sorted by `id` ascending.
 
-After creating both scripts, run them in sequence:
-```
-python /app/compress.py
-python /app/decompress.py
-```
+Hints about the corruption:
+- The original records were serialized as fixed-width binary frames (each frame is exactly 128 bytes)
+- Each frame contains: 4-byte little-endian id, 32-byte null-padded key, 92-byte null-padded value
+- After serialization, a byte-level transformation was applied to the entire file
+- The transformation operates on 16-byte blocks independently
+- Within each block, bytes were permuted (reordered) using a fixed permutation pattern
+- The permutation pattern repeats every 16 bytes throughout the file
+- There are exactly 200 records in the original dataset
 
-Verify your output by comparing the files:
-```
-cmp /app/data/corpus.bin /app/output/restored.bin
-```
+Your script must determine the permutation, reverse it, then parse the frames. Write the result as JSON to `/app/output/recovered.json`.
 
-The corpus contains structured English text with repeating patterns. Choose your compression strategy accordingly.
+Run your script after creating it: `python /app/recover.py`

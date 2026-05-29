@@ -1,23 +1,61 @@
 #!/bin/bash
 # Fix all bugs in the log aggregator
 
-# Bug 1: Fix variable name typo in main.py (result -> results)
-sed -i 's/write_report(result,/write_report(results,/' /app/logagg/main.py
+# Bug 1: Fix glob pattern to match both .log and .LOG extensions
+cat > /tmp/fix_main.py << 'EOF'
+import re
 
-# Bug 2: Fix regex in parser.py to handle timezone with colon (+05:30)
-sed -i 's/\[+-\]\\d{4}/[+-]\\d{2}:\\d{2}/' /app/logagg/parser.py
+with open("/app/logagg/main.py", "r") as f:
+    content = f.read()
 
-# Bug 3: Fix inverted multiline condition (not line.startswith -> line.startswith)
-sed -i 's/elif current_record and not line.startswith(" ")/elif current_record and line.startswith(" ")/' /app/logagg/parser.py
+# Replace the discover_logs function to handle case-insensitive matching
+old = '''def discover_logs(directory):
+    """Find all log files in directory."""
+    # Bug 1: only matches .log not .LOG — misses some files
+    pattern = os.path.join(directory, "*.log")
+    return sorted(glob.glob(pattern))'''
 
-# Bug 4: Fix date format in aggregator.py (%Y-%d-%m -> %Y-%m-%d)
-sed -i 's/%Y-%d-%m/%Y-%m-%d/' /app/logagg/aggregator.py
+new = '''def discover_logs(directory):
+    """Find all log files in directory."""
+    files = []
+    for f in os.listdir(directory):
+        if f.lower().endswith(".log"):
+            files.append(os.path.join(directory, f))
+    return sorted(files)'''
 
-# Bug 5: Fix error_rate calculation (divide by service count, not total)
-sed -i 's/data\["errors"\] \/ total_events/data["errors"] \/ data["count"]/' /app/logagg/aggregator.py
+content = content.replace(old, new)
 
-# Bug 6: Fix file open mode in writer.py ("a" -> "w")
-sed -i 's/open(output_path, "a")/open(output_path, "w")/' /app/logagg/writer.py
+with open("/app/logagg/main.py", "w") as f:
+    f.write(content)
+EOF
+python /tmp/fix_main.py
+
+# Bug 3: Fix multiline detection (tab -> space)
+sed -i 's/line.startswith("\\t")/line.startswith(" ")/' /app/logagg/parser.py
+
+# Bug 4: Fix timezone conversion (should subtract offset to get UTC)
+cat > /tmp/fix_parser.py << 'EOF'
+with open("/app/logagg/parser.py", "r") as f:
+    content = f.read()
+
+old = '''    utc_dt = dt_naive + timedelta(hours=sign * offset_hours, minutes=sign * offset_minutes)'''
+new = '''    utc_dt = dt_naive - timedelta(hours=sign * offset_hours, minutes=sign * offset_minutes)'''
+
+content = content.replace(old, new)
+
+with open("/app/logagg/parser.py", "w") as f:
+    f.write(content)
+EOF
+python /tmp/fix_parser.py
+
+# Bug 5: Fix daily_counts to use string key instead of date object
+sed -i 's/day_key = rec\["timestamp"\].date()/day_key = rec["timestamp"].strftime("%Y-%m-%d")/' /app/logagg/aggregator.py
+
+# Bug 6: Fix error_rate precision (round to 4 decimals)
+sed -i 's/round(data\["errors"\] \/ data\["count"\], 2)/round(data["errors"] \/ data["count"], 4)/' /app/logagg/aggregator.py
+
+# Bug 8: writer.py doesn't need fixing now since daily_counts keys are strings after bug 5 fix
+# But we need to verify it works
 
 # Run the fixed tool
 python /app/logagg/main.py

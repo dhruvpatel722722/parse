@@ -66,19 +66,19 @@ def test_by_service_counts():
 
 
 def test_error_rate_calculation():
-    """Test that error_rate is calculated as fraction of errors within each service."""
+    """Test that error_rate is calculated as fraction of errors within each service with 4 decimal precision."""
     with open("/app/output/report.json", "r") as f:
         data = json.load(f)
     services = data["by_service"]
     # auth-service: 3 errors out of 9 events = 0.3333
     auth_rate = services["auth-service"]["error_rate"]
-    assert abs(auth_rate - 3/9) < 0.01, f"auth-service error_rate wrong: {auth_rate}, expected {3/9:.4f}"
+    assert abs(auth_rate - round(3/9, 4)) < 0.001, f"auth-service error_rate wrong: {auth_rate}"
     # api-gateway: 2 errors out of 6 events = 0.3333
     gw_rate = services["api-gateway"]["error_rate"]
-    assert abs(gw_rate - 2/6) < 0.01, f"api-gateway error_rate wrong: {gw_rate}, expected {2/6:.4f}"
+    assert abs(gw_rate - round(2/6, 4)) < 0.001, f"api-gateway error_rate wrong: {gw_rate}"
     # payment-svc: 2 errors out of 5 events = 0.4
     pay_rate = services["payment-svc"]["error_rate"]
-    assert abs(pay_rate - 2/5) < 0.01, f"payment-svc error_rate wrong: {pay_rate}, expected {2/5:.4f}"
+    assert abs(pay_rate - round(2/5, 4)) < 0.001, f"payment-svc error_rate wrong: {pay_rate}"
 
 
 def test_time_range_format():
@@ -89,7 +89,6 @@ def test_time_range_format():
     start = datetime.fromisoformat(tr["start"])
     end = datetime.fromisoformat(tr["end"])
     assert start < end, "start should be before end"
-    # Verify UTC (offset should be +00:00)
     assert "+00:00" in tr["start"] or "Z" in tr["start"], f"start not in UTC: {tr['start']}"
     assert "+00:00" in tr["end"] or "Z" in tr["end"], f"end not in UTC: {tr['end']}"
 
@@ -104,9 +103,9 @@ def test_time_range_values():
     # First log: 2024-03-15T10:30:45+05:30 = 2024-03-15T05:00:45+00:00
     assert start.year == 2024 and start.month == 3 and start.day == 15, f"Unexpected start date: {start}"
     assert start.hour == 5 and start.minute == 0, f"Unexpected start time: {start}"
-    # Last log: 2024-03-16T08:04:30-04:00 = 2024-03-16T12:04:30+00:00
+    # Last log: 2024-03-16T14:01:00+00:00
     assert end.year == 2024 and end.month == 3 and end.day == 16, f"Unexpected end date: {end}"
-    assert end.hour == 12 and end.minute == 4, f"Unexpected end time: {end}"
+    assert end.hour == 14 and end.minute == 1, f"Unexpected end time: {end}"
 
 
 def test_multi_line_events_count():
@@ -117,14 +116,16 @@ def test_multi_line_events_count():
 
 
 def test_daily_counts_keys():
-    """Test that daily_counts has entries for each day with events in YYYY-MM-DD format."""
+    """Test that daily_counts has string date keys in YYYY-MM-DD format for each day."""
     with open("/app/output/report.json", "r") as f:
         data = json.load(f)
     daily = data["daily_counts"]
-    # Events span March 15 (UTC) and March 16 (UTC)
     assert "2024-03-15" in daily, f"Missing 2024-03-15 in daily_counts: {daily}"
     assert "2024-03-16" in daily, f"Missing 2024-03-16 in daily_counts: {daily}"
     assert len(daily) == 2, f"Expected 2 days, got {len(daily)}: {daily}"
+    for key in daily:
+        assert isinstance(key, str), f"daily_counts key should be string, got {type(key)}"
+        assert len(key) == 10 and key[4] == '-' and key[7] == '-', f"Invalid date format: {key}"
 
 
 def test_daily_counts_values():
@@ -140,8 +141,6 @@ def test_report_not_corrupted():
     """Test that the JSON file contains exactly one JSON object (not appended duplicates)."""
     with open("/app/output/report.json", "r") as f:
         content = f.read().strip()
-    # Should parse as single object
     data = json.loads(content)
     assert isinstance(data, dict), "Report should be a single JSON object"
-    # Check no trailing data
-    assert content.count('"total_events"') == 1, "Report appears to have duplicate data (append bug)"
+    assert content.count('"total_events"') == 1, "Report appears to have duplicate data"

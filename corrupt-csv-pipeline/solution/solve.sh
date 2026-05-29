@@ -68,6 +68,8 @@ def parse_number(val):
         return None
     # Remove currency symbols
     val = re.sub(r'[$\xa3\xa5]', '', val)
+    # Remove thousands separators (commas between digits)
+    val = re.sub(r'(\d),(\d)', r'\1\2', val)
     # Handle scientific notation
     try:
         result = float(val)
@@ -108,7 +110,7 @@ for line in lines:
     except Exception:
         continue
 
-    if len(fields) < 6:
+    if len(fields) != 6:
         continue
 
     # Extract fields
@@ -131,8 +133,11 @@ for line in lines:
     if quantity is None or unit_price is None:
         continue
 
-    # Drop zero or negative quantities
+    # Drop zero or negative quantities or prices
     if quantity <= 0:
+        continue
+
+    if unit_price <= 0:
         continue
 
     # Skip if product is empty
@@ -146,7 +151,7 @@ for line in lines:
         'region': region,
         'category': category,
         'product': product,
-        'quantity': int(quantity),
+        'quantity': quantity if quantity != int(quantity) else int(quantity),
         'unit_price': unit_price,
         'total': total
     })

@@ -5,8 +5,9 @@ I need you to write a Python script at `/app/pipeline.py` that reads this file, 
 1. `/app/output/cleaned.csv` — the fully cleaned data with columns: `date,region,category,product,quantity,unit_price,total`  
    - All dates must be in `YYYY-MM-DD` format (drop rows with unparseable or malformed dates)
    - The `total` column should be `quantity * unit_price`  
-   - Drop rows where quantity or unit_price cannot be parsed into valid positive numbers
-   - Drop rows where quantity is zero or negative
+   - Drop rows where quantity or unit_price cannot be parsed into valid positive numbers (both must be strictly greater than zero)
+   - Quantities can be fractional (e.g., 3.5 is valid)
+   - If a row has more or fewer than 6 data fields after delimiter detection, drop it
    - Drop rows with empty product names
    - Output should be sorted by date ascending, then region alphabetically
 

@@ -36,7 +36,7 @@ def test_cleaned_csv_row_count():
         reader = csv.reader(f)
         next(reader)  # skip header
         rows = list(reader)
-    assert len(rows) == 31, f"Expected 31 data rows, got {len(rows)}"
+    assert len(rows) == 38, f"Expected 38 data rows, got {len(rows)}"
 
 
 def test_cleaned_csv_date_format():

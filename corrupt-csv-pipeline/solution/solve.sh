@@ -1,5 +1,5 @@
 #!/bin/bash
-# Do NOT use set -e or set -euo pipefail
+# No strict error flags here
 
 mkdir -p /app/output
 

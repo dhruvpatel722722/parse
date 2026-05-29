@@ -1,17 +1,19 @@
-Hey, so we've got this sales data dump from three different regional offices and someone just mashed them together into one file at `/app/data/sales_raw.csv`. The thing is a mess — each office apparently used their own export settings and nobody bothered to standardize anything before merging.
+Hey, so we've got this sales data dump from three different regional offices and someone just mashed them together into one file at `/app/data/sales_raw.csv`. The thing is a mess — each office used their own export settings and nobody standardized anything before merging.
 
 I need you to write a Python script at `/app/pipeline.py` that reads this file, cleans it up, and produces two output files:
 
 1. `/app/output/cleaned.csv` — the fully cleaned data with columns: `date,region,category,product,quantity,unit_price,total`  
-   - All dates must be in `YYYY-MM-DD` format (drop rows with unparseable or malformed dates)
+   - Dates appear in multiple formats (YYYY-MM-DD, DD/MM/YYYY, MM-DD-YYYY, YYYY.MM.DD) — normalize all to `YYYY-MM-DD`, drop rows with invalid calendar dates
+   - Strip currency symbols ($) and thousands separators (commas between digits) before parsing numbers
+   - Remove any embedded null bytes from fields before parsing
    - The `total` column should be `quantity * unit_price`  
-   - Drop rows where quantity or unit_price cannot be parsed into valid positive numbers (both must be strictly greater than zero)
+   - Drop rows where quantity or unit_price cannot be parsed into valid positive numbers (strictly greater than zero)
    - Quantities can be fractional (e.g., 3.5 is valid)
    - If a row has more or fewer than 6 data fields after delimiter detection, drop it
    - Drop rows with empty product names
-   - Output should be sorted by date ascending, then region alphabetically
+   - Output sorted by date ascending, then region alphabetically
 
-2. `/app/output/summary.json` — aggregated stats as a JSON object with this structure:
+2. `/app/output/summary.json` — aggregated stats:
    ```
    {
      "by_region": {"<region>": {"revenue": <float>, "orders": <int>}},
@@ -22,6 +24,6 @@ I need you to write a Python script at `/app/pipeline.py` that reads this file, 
    }
    ```
 
-Revenue means sum of all `total` values. Orders means count of valid rows. The `by_category` groups revenue by region first, then category within each region.
+Revenue is sum of `total` values. Orders is count of valid rows. `by_category` groups revenue by region then category.
 
-Make sure the output directory exists before writing. Run the script after creating it.
+Make sure the output directory exists. Run the script after creating it.

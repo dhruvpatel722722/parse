@@ -1,257 +1,228 @@
 #!/usr/bin/env python3
-"""Generate the broken log aggregator and sample log files."""
+"""Generate the slow query engine and dataset."""
 import os
+import json
+import random
+import hashlib
 
-os.makedirs("/app/logagg", exist_ok=True)
-os.makedirs("/app/logs", exist_ok=True)
+os.makedirs("/app/engine", exist_ok=True)
+os.makedirs("/app/data", exist_ok=True)
 os.makedirs("/app/output", exist_ok=True)
 
-# === main.py — Bug 1: import shadows stdlib 'parser' module ===
-# The file imports from local parser.py but on Python 3.13 there's no stdlib parser
-# conflict. Real bug: the glob pattern misses files with uppercase .LOG extension
-with open("/app/logagg/main.py", "w") as f:
-    f.write('''import os
+# === Generate dataset: 50000 records ===
+random.seed(42)
+TAGS = ["python", "java", "rust", "go", "javascript", "typescript", "c++", "ruby",
+        "sql", "docker", "kubernetes", "aws", "linux", "git", "api", "web",
+        "mobile", "security", "testing", "devops"]
+SERVICES = ["auth", "payment", "search", "analytics", "notifications", "storage"]
+
+records = []
+for i in range(200000):
+    num_tags = random.randint(1, 5)
+    tags = random.sample(TAGS, num_tags)
+    score = round(random.uniform(0, 100), 2)
+    # Timestamps spread over 365 days in 2024
+    day = random.randint(0, 364)
+    hour = random.randint(0, 23)
+    minute = random.randint(0, 59)
+    ts = f"2024-{(day // 30) + 1:02d}-{(day % 30) + 1:02d}T{hour:02d}:{minute:02d}:00Z"
+    title = f"Record {i} - {random.choice(SERVICES)} {random.choice(['issue', 'feature', 'task', 'bug', 'improvement'])}"
+    records.append({
+        "id": i,
+        "title": title,
+        "tags": tags,
+        "score": score,
+        "timestamp": ts,
+    })
+
+with open("/app/data/records.json", "w") as f:
+    json.dump(records, f)
+
+# === data.py — simple data loader ===
+with open("/app/engine/data.py", "w") as f:
+    f.write('''import json
+
+def load_records(path="/app/data/records.json"):
+    """Load records from JSON file."""
+    with open(path) as f:
+        return json.load(f)
+''')
+
+# === index.py — intentionally naive, no indexing ===
+with open("/app/engine/index.py", "w") as f:
+    f.write('''from data import load_records
+
+class SearchIndex:
+    """A search index over the records dataset."""
+    
+    def __init__(self):
+        self.records = load_records()
+    
+    def get_all_records(self):
+        """Return all records (no indexing, just raw data)."""
+        return self.records
+    
+    def get_records_by_tag(self, tag):
+        """Linear scan to find records with a given tag."""
+        return [r for r in self.records if tag in r["tags"]]
+    
+    def get_records_in_score_range(self, min_score, max_score):
+        """Linear scan for score range."""
+        return [r for r in self.records if min_score <= r["score"] <= max_score]
+    
+    def get_records_in_time_range(self, start, end):
+        """Linear scan for timestamp range."""
+        return [r for r in self.records if start <= r["timestamp"] <= end]
+''')
+
+# === query.py — intentionally slow query execution ===
+with open("/app/engine/query.py", "w") as f:
+    f.write("""from index import SearchIndex
+
+class QueryEngine:
+    \"\"\"Execute queries against the search index.\"\"\"
+    
+    def __init__(self):
+        self.index = SearchIndex()
+    
+    def execute(self, query):
+        \"\"\"Execute a query dict and return matching records.\"\"\"
+        results = self.index.get_all_records().copy()
+        
+        # Filter by tags (AND logic: must have ALL specified tags)
+        if "tags_all" in query:
+            for tag in query["tags_all"]:
+                results = [r for r in results if tag in r["tags"]]
+        
+        # Filter by tags (OR logic: must have ANY specified tag)
+        if "tags_any" in query:
+            required_tags = set(query["tags_any"])
+            results = [r for r in results if required_tags.intersection(r["tags"])]
+        
+        # Filter by score range
+        if "min_score" in query:
+            results = [r for r in results if r["score"] >= query["min_score"]]
+        if "max_score" in query:
+            results = [r for r in results if r["score"] <= query["max_score"]]
+        
+        # Filter by timestamp range
+        if "start_time" in query:
+            results = [r for r in results if r["timestamp"] >= query["start_time"]]
+        if "end_time" in query:
+            results = [r for r in results if r["timestamp"] <= query["end_time"]]
+        
+        # Sort
+        if "sort_by" in query:
+            field = query["sort_by"]
+            reverse = query.get("sort_desc", False)
+            results.sort(key=lambda r: r[field], reverse=reverse)
+        
+        # Pagination
+        offset = query.get("offset", 0)
+        limit = query.get("limit", len(results))
+        results = results[offset:offset + limit]
+        
+        return results
+""")
+
+# === bench.py — benchmark runner (agent must NOT modify this) ===
+with open("/app/engine/bench.py", "w") as f:
+    f.write('''import json
+import time
 import sys
-import glob
-from parser import parse_log_file
-from aggregator import aggregate_records
-from writer import write_report
+import os
+import hashlib
 
-LOG_DIR = "/app/logs"
-OUTPUT_PATH = "/app/output/report.json"
+sys.path.insert(0, "/app/engine")
+from query import QueryEngine
 
-def discover_logs(directory):
-    """Find all log files in directory."""
-    # Bug 1: only matches .log not .LOG — misses some files
-    pattern = os.path.join(directory, "*.log")
-    return sorted(glob.glob(pattern))
+QUERIES = [
+    # Tag AND queries
+    {"tags_all": ["python", "docker"], "sort_by": "score", "sort_desc": True, "limit": 100},
+    {"tags_all": ["rust", "linux"], "sort_by": "timestamp", "limit": 50},
+    {"tags_all": ["javascript", "web", "api"], "sort_by": "score", "limit": 20},
+    # Tag OR queries
+    {"tags_any": ["kubernetes", "docker", "devops"], "min_score": 50, "sort_by": "score", "sort_desc": True, "limit": 200},
+    {"tags_any": ["python", "rust", "go"], "max_score": 30, "sort_by": "timestamp", "limit": 150},
+    # Score range queries
+    {"min_score": 80, "max_score": 100, "sort_by": "score", "sort_desc": True, "limit": 500},
+    {"min_score": 0, "max_score": 10, "sort_by": "timestamp", "sort_desc": True, "limit": 100},
+    # Timestamp range queries
+    {"start_time": "2024-06-01T00:00:00Z", "end_time": "2024-06-30T23:59:00Z", "sort_by": "score", "sort_desc": True, "limit": 100},
+    {"start_time": "2024-01-01T00:00:00Z", "end_time": "2024-03-31T23:59:00Z", "tags_any": ["python", "java"], "sort_by": "timestamp", "limit": 200},
+    # Combined complex queries
+    {"tags_all": ["python"], "min_score": 60, "start_time": "2024-03-01T00:00:00Z", "end_time": "2024-09-30T23:59:00Z", "sort_by": "score", "sort_desc": True, "limit": 50},
+    {"tags_any": ["security", "testing"], "min_score": 40, "max_score": 80, "sort_by": "timestamp", "sort_desc": True, "limit": 100, "offset": 50},
+    {"tags_all": ["go", "api"], "max_score": 70, "sort_by": "title", "limit": 30},
+    # Pagination-heavy queries
+    {"tags_any": ["python", "java", "javascript", "typescript"], "sort_by": "score", "sort_desc": True, "limit": 100, "offset": 500},
+    {"min_score": 20, "max_score": 80, "sort_by": "timestamp", "limit": 50, "offset": 1000},
+    {"tags_any": ["docker", "kubernetes", "aws"], "sort_by": "score", "limit": 200, "offset": 200},
+    # Repeat queries to test consistency
+    {"tags_all": ["python", "docker"], "sort_by": "score", "sort_desc": True, "limit": 100},
+    {"tags_any": ["kubernetes", "docker", "devops"], "min_score": 50, "sort_by": "score", "sort_desc": True, "limit": 200},
+    {"min_score": 80, "max_score": 100, "sort_by": "score", "sort_desc": True, "limit": 500},
+    # High-selectivity queries
+    {"tags_all": ["python", "security", "testing"], "sort_by": "score", "sort_desc": True, "limit": 10},
+    {"tags_all": ["rust", "kubernetes"], "min_score": 70, "sort_by": "timestamp", "limit": 20},
+]
 
-def main():
-    log_files = discover_logs(LOG_DIR)
+def compute_result_hash(results):
+    """Compute a deterministic hash of query results for validation."""
+    canonical = json.dumps(results, sort_keys=True, default=str)
+    return hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
-    if not log_files:
-        print("No log files found")
-        sys.exit(1)
-
-    all_records = []
-    for fpath in log_files:
-        records = parse_log_file(fpath)
-        all_records.extend(records)
-
-    report = aggregate_records(all_records)
-    write_report(report, OUTPUT_PATH)
-    print(f"Report written to {OUTPUT_PATH}")
+def run_benchmark():
+    engine = QueryEngine()
+    
+    total_start = time.time()
+    all_results = []
+    query_times = []
+    
+    for iteration in range(3):
+        for i, query in enumerate(QUERIES):
+            start = time.time()
+            result = engine.execute(query)
+            elapsed = time.time() - start
+            query_times.append(elapsed)
+            if iteration == 0:
+                all_results.append({
+                    "query_index": i,
+                    "num_results": len(result),
+                    "hash": compute_result_hash(result),
+                    "time_ms": round(elapsed * 1000, 2),
+                })
+    
+    total_time = time.time() - total_start
+    
+    bench_result = {
+        "total_time_seconds": round(total_time, 3),
+        "passed": total_time < 2.0,
+        "num_queries": len(QUERIES),
+        "query_results": all_results,
+    }
+    
+    os.makedirs("/app/output", exist_ok=True)
+    with open("/app/output/bench_result.json", "w") as f:
+        json.dump(bench_result, f, indent=2)
+    
+    print(f"Benchmark complete: {total_time:.3f}s ({'PASSED' if total_time < 2.0 else 'FAILED'})")
+    print(f"Target: < 2.0s")
+    for i, qt in enumerate(query_times[:len(QUERIES)]):
+        print(f"  Query {i:2d}: {qt*1000:8.2f}ms ({all_results[i]['num_results']} results)")
+    
+    return bench_result
 
 if __name__ == "__main__":
-    main()
+    run_benchmark()
 ''')
 
-# === parser.py ===
-# Bug 2: regex uses \\s+ which also matches \\t, but the actual separator
-# between timestamp and service could be a tab in some log lines
-# Bug 3: multiline detection checks for TAB indent but continuation lines use spaces
-# Bug 4: parse_timestamp strips timezone colon ONLY if the third-from-last char is ':'
-#         but this breaks for timestamps already in +0000 format (no colon)
-#         Actually: the real subtle bug is it converts to UTC but the test expects
-#         UTC timestamps — the bug is that when offset is negative, the manual
-#         hour adjustment adds instead of subtracting
-with open("/app/logagg/parser.py", "w") as f:
-    f.write('''import re
-from datetime import datetime, timezone, timedelta
+print("Generated query engine at /app/engine/")
+print("Generated dataset at /app/data/records.json")
 
-LOG_PATTERN = re.compile(
-    r"^(\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}[+-]\\d{2}:\\d{2})\\s+(\\S+)\\s+(ERROR|WARN|INFO)\\s+(.*)$"
-)
-
-def parse_timestamp(ts_str):
-    """Parse ISO-8601 timestamp with timezone to UTC datetime."""
-    # Extract offset manually for conversion
-    sign = 1 if ts_str[-6] == '+' else -1
-    offset_hours = int(ts_str[-5:-3])
-    offset_minutes = int(ts_str[-2:])
-    base_str = ts_str[:-6]
-    
-    dt_naive = datetime.strptime(base_str, "%Y-%m-%dT%H:%M:%S")
-    # Bug 4: sign is applied wrong — subtracts when should add and vice versa
-    # To convert local -> UTC: subtract the offset
-    # But code does: utc = local + sign*offset (should be local - sign*offset)
-    offset = timedelta(hours=offset_hours, minutes=offset_minutes)
-    utc_dt = dt_naive + timedelta(hours=sign * offset_hours, minutes=sign * offset_minutes)
-    return utc_dt.replace(tzinfo=timezone.utc)
-
-def parse_log_file(filepath):
-    """Parse a log file into structured records."""
-    records = []
-    current_record = None
-
-    with open(filepath, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.rstrip("\\n")
-            if not line:
-                continue
-            
-            match = LOG_PATTERN.match(line)
-
-            if match:
-                if current_record:
-                    records.append(current_record)
-                ts_str, service, level, message = match.groups()
-                current_record = {
-                    "timestamp": parse_timestamp(ts_str),
-                    "service": service,
-                    "level": level,
-                    "message": message,
-                    "is_multiline": False
-                }
-            # Bug 3: checks for tab indent but continuation lines use spaces
-            elif current_record and line.startswith("\\t"):
-                current_record["message"] += "\\n" + line
-                current_record["is_multiline"] = True
-
-    if current_record:
-        records.append(current_record)
-
-    return records
-''')
-
-# === aggregator.py ===
-# Bug 5: daily_counts uses the ORIGINAL timestamp date, not the UTC-converted date
-#         Since timestamps are already converted to UTC in parser, this is fine...
-#         EXCEPT: the counter uses rec["timestamp"].date() but then formats as string
-#         using strftime("%Y-%m-%d") — but date() returns a date object and the
-#         dict key becomes a date object, not a string!
-# Bug 6: error_rate rounds to 2 decimal places but test expects 4
-# Bug 7: by_level only counts levels that appear — if no DEBUG events,
-#         the key is missing. Test expects all three levels always present
-#         Actually let's make bug 7: the level comparison is case-sensitive
-#         but some internal processing lowercases it
-with open("/app/logagg/aggregator.py", "w") as f:
-    f.write('''from collections import defaultdict
-from datetime import date
-
-def aggregate_records(records):
-    """Aggregate parsed log records into summary statistics."""
-    if not records:
-        return {
-            "total_events": 0,
-            "by_level": {"ERROR": 0, "WARN": 0, "INFO": 0},
-            "by_service": {},
-            "time_range": {"start": "", "end": ""},
-            "multi_line_events": 0,
-            "daily_counts": {},
-        }
-
-    by_level = {"ERROR": 0, "WARN": 0, "INFO": 0}
-    by_service = defaultdict(lambda: {"count": 0, "errors": 0})
-    daily_counts = defaultdict(int)
-    multi_line_count = 0
-
-    for rec in records:
-        level = rec["level"]
-        by_level[level] = by_level.get(level, 0) + 1
-
-        svc = rec["service"]
-        by_service[svc]["count"] += 1
-        if rec["level"] == "ERROR":
-            by_service[svc]["errors"] += 1
-
-        if rec["is_multiline"]:
-            multi_line_count += 1
-
-        # Bug 5: uses .date() which returns a date object as dict key
-        # json.dump will fail on date keys — need .strftime("%Y-%m-%d")
-        day_key = rec["timestamp"].date()
-        daily_counts[day_key] += 1
-
-    total_events = len(records)
-    service_stats = {}
-    for svc, data in by_service.items():
-        service_stats[svc] = {
-            "count": data["count"],
-            # Bug 6: rounds to 2 decimals, test expects 4 decimal precision
-            "error_rate": round(data["errors"] / data["count"], 2)
-        }
-
-    timestamps = [r["timestamp"] for r in records]
-    time_range = {
-        "start": min(timestamps).isoformat(),
-        "end": max(timestamps).isoformat(),
-    }
-
-    return {
-        "total_events": total_events,
-        "by_level": by_level,
-        "by_service": service_stats,
-        "time_range": time_range,
-        "multi_line_events": multi_line_count,
-        "daily_counts": dict(daily_counts),
-    }
-''')
-
-# === writer.py ===
-# Bug 8: json.dump with default=str handles date keys BUT it also stringifies
-# everything unexpected — actually let's make the bug that it writes with
-# ensure_ascii=True which mangles any unicode in messages, AND
-# it doesn't handle date objects so it crashes
-with open("/app/logagg/writer.py", "w") as f:
-    f.write('''import json
-import os
-
-def write_report(data, output_path):
-    """Write aggregation report to JSON file."""
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    with open(output_path, "w") as f:
-        # Bug 8: no default handler for date objects in daily_counts keys
-        # This will raise TypeError: keys must be str, int, float, bool or None
-        json.dump(data, f, indent=2)
-''')
-
-# === Generate log files ===
-# Use .log for most but one .LOG file that gets missed (Bug 1)
-log1_content = """2024-03-15T10:30:45+05:30 auth-service ERROR Authentication failed for user admin
-2024-03-15T10:30:46+05:30 auth-service ERROR Exception in auth handler
-  at auth.validate_token(auth.py:142)
-  at middleware.process(middleware.py:38)
-2024-03-15T10:31:00+05:30 auth-service INFO User login successful user=john
-2024-03-15T10:31:15+05:30 api-gateway WARN Rate limit approaching for client 10.0.0.5
-2024-03-15T10:32:00+05:30 api-gateway INFO Request processed in 245ms
-2024-03-15T10:32:30+05:30 auth-service WARN Token expiring soon for session abc123
-2024-03-15T10:33:00+05:30 payment-svc ERROR Payment processing timeout
-  at payment.charge(payment.py:89)
-  at handlers.checkout(handlers.py:201)
-  caused by: ConnectionTimeout after 30s
-2024-03-15T10:33:45+05:30 payment-svc INFO Retry successful for txn-7891
-2024-03-15T10:34:00+05:30 api-gateway ERROR Upstream connection refused
-2024-03-15T10:34:30+05:30 auth-service INFO Session cleanup completed
-"""
-
-log2_content = """2024-03-16T08:00:00-04:00 auth-service INFO Service startup complete
-2024-03-16T08:00:15-04:00 api-gateway INFO Health check passed
-2024-03-16T08:01:00-04:00 payment-svc WARN Connection pool nearly exhausted
-2024-03-16T08:01:30-04:00 auth-service ERROR Database connection lost
-  at db.connect(database.py:55)
-  at auth.refresh_cache(auth.py:200)
-2024-03-16T08:02:00-04:00 api-gateway ERROR Request timeout after 60s
-  at proxy.forward(proxy.py:112)
-2024-03-16T08:02:30-04:00 payment-svc INFO Connection pool recovered
-2024-03-16T08:03:00-04:00 auth-service WARN High memory usage detected: 89%
-2024-03-16T08:03:30-04:00 api-gateway INFO Cache invalidation complete
-"""
-
-# This file has .LOG extension (uppercase) - missed by Bug 1
-log3_content = """2024-03-16T14:00:00+00:00 payment-svc ERROR Duplicate transaction detected txn-8012
-2024-03-16T14:01:00+00:00 auth-service INFO Database reconnected successfully
-"""
-
-with open("/app/logs/app-2024-03-15.log", "w") as f:
-    f.write(log1_content.strip() + "\n")
-
-with open("/app/logs/app-2024-03-16.log", "w") as f:
-    f.write(log2_content.strip() + "\n")
-
-# Bug 1 trigger: uppercase .LOG extension
-with open("/app/logs/app-2024-03-16-late.LOG", "w") as f:
-    f.write(log3_content.strip() + "\n")
-
-print("Generated broken log aggregator at /app/logagg/")
-print("Generated log files at /app/logs/")
+# Store hash of bench.py for tamper detection
+import hashlib
+with open("/app/engine/bench.py", "rb") as f:
+    bench_hash = hashlib.sha256(f.read()).hexdigest()[:16]
+with open("/app/data/.bench_hash", "w") as f:
+    f.write(bench_hash)

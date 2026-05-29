@@ -1,33 +1,28 @@
-There's a broken Python log aggregation tool at `/app/logagg/`. It reads log files from `/app/logs/` and should produce a summary report at `/app/output/report.json`.
+There's a slow query engine at `/app/engine/` that processes search queries against an in-memory dataset. It works correctly but is too slow.
 
-Run it with `python /app/logagg/main.py` — it crashes or produces wrong results. Your job is to find and fix all the bugs so it works correctly.
+Run it with: `python /app/engine/bench.py`
 
-The tool has these components:
-- `main.py` — orchestrator that reads config and drives the pipeline
-- `parser.py` — parses individual log lines into structured records
-- `aggregator.py` — groups records and computes statistics
-- `writer.py` — formats and writes the JSON report
+It will execute a benchmark of queries and report timing. Your task is to optimize the engine so the full benchmark completes in under 2.0 seconds while still producing correct results.
 
-The report should contain:
-```
-{
-  "total_events": <int>,
-  "by_level": {"ERROR": <int>, "WARN": <int>, "INFO": <int>},
-  "by_service": {"<name>": {"count": <int>, "error_rate": <float>}},
-  "time_range": {"start": "<ISO-8601>", "end": "<ISO-8601>"},
-  "multi_line_events": <int>,
-  "daily_counts": {"<YYYY-MM-DD>": <int>}
-}
-```
+The engine has these files:
+- `bench.py` — benchmark runner (do not modify)
+- `index.py` — builds the search index from raw data
+- `query.py` — executes queries against the index
+- `data.py` — loads the dataset
 
-Where `error_rate` is the fraction of ERROR events for that service (0.0 to 1.0). Times should be in UTC ISO-8601 format. Multi-line events (like stack traces) count as a single event. The `daily_counts` maps each calendar day to the number of events on that day.
+The dataset at `/app/data/records.json` contains 200,000 records with fields: `id`, `title`, `tags`, `score`, `timestamp`. The benchmark runs queries that:
+1. Filter by tag combinations (AND/OR logic)
+2. Filter by score ranges
+3. Filter by timestamp ranges
+4. Sort results by different fields
+5. Apply pagination (offset + limit)
 
-The log files use standard syslog-like format:
-```
-2024-03-15T10:30:45+05:30 service-name ERROR Single line message
-2024-03-15T10:30:46+05:30 service-name ERROR Exception occurred
-  at module.function(file.py:42)
-  at main.run(main.py:10)
-```
+Current performance is around 15-25 seconds for the full benchmark. You need to get it under 2.0 seconds.
 
-Fix all bugs. The output file must exist at `/app/output/report.json` after running the fixed tool.
+Constraints:
+- You must NOT modify `bench.py` or `/app/data/records.json`
+- The query results must remain identical (same records, same order)
+- All optimizations must be in `index.py` and/or `query.py`
+- Write your optimized files to `/app/engine/index.py` and `/app/engine/query.py`
+
+After optimizing, run the benchmark again to verify it passes. The benchmark writes results to `/app/output/bench_result.json`.

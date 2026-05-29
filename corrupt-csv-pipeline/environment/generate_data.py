@@ -124,3 +124,6 @@ with open('/app/data/sales_raw.csv', 'wb') as f:
         f.write(b'\n')
 
 print("Generated corrupted CSV at /app/data/sales_raw.csv")
+
+
+# v2 - additional edge cases for robustness

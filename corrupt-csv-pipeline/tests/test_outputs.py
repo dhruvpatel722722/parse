@@ -2,28 +2,13 @@ import csv
 import json
 import os
 import subprocess
-import hashlib
 from pathlib import Path
 
 
 def test_pipeline_script_exists():
-    """Test that the pipeline Python script was created at the expected path."""
+    """Test that the pipeline Python script was created and the output directory exists."""
     assert os.path.exists("/app/pipeline.py"), "Pipeline script /app/pipeline.py does not exist"
-
-
-def test_output_directory_exists():
-    """Test that the output directory was created."""
     assert os.path.isdir("/app/output"), "Output directory /app/output does not exist"
-
-
-def test_cleaned_csv_exists():
-    """Test that the cleaned CSV output file was produced."""
-    assert os.path.exists("/app/output/cleaned.csv"), "Cleaned CSV /app/output/cleaned.csv does not exist"
-
-
-def test_summary_json_exists():
-    """Test that the summary JSON output file was produced."""
-    assert os.path.exists("/app/output/summary.json"), "Summary JSON /app/output/summary.json does not exist"
 
 
 def test_pipeline_runs_without_error():
@@ -35,8 +20,9 @@ def test_pipeline_runs_without_error():
     assert result.returncode == 0, f"Pipeline failed with error: {result.stderr}"
 
 
-def test_cleaned_csv_header():
-    """Test that the cleaned CSV has the correct column headers."""
+def test_cleaned_csv_exists_with_correct_header():
+    """Test that the cleaned CSV exists and has the correct column headers."""
+    assert os.path.exists("/app/output/cleaned.csv"), "Cleaned CSV /app/output/cleaned.csv does not exist"
     with open("/app/output/cleaned.csv", "r") as f:
         reader = csv.reader(f)
         header = next(reader)
@@ -50,8 +36,6 @@ def test_cleaned_csv_row_count():
         reader = csv.reader(f)
         next(reader)  # skip header
         rows = list(reader)
-    # 31 valid rows after removing: header dupes, unparseable dates, empty product row,
-    # zero/negative quantity rows, and rows with completely invalid numbers
     assert len(rows) == 31, f"Expected 31 data rows, got {len(rows)}"
 
 
@@ -97,17 +81,12 @@ def test_cleaned_csv_no_null_bytes():
     assert b'\x00' not in content, "Cleaned CSV contains null bytes"
 
 
-def test_summary_json_valid():
-    """Test that the summary JSON is valid and parseable."""
+def test_summary_json_exists_and_valid():
+    """Test that the summary JSON exists, is valid, and contains all required keys."""
+    assert os.path.exists("/app/output/summary.json"), "Summary JSON /app/output/summary.json does not exist"
     with open("/app/output/summary.json", "r") as f:
         data = json.load(f)
     assert isinstance(data, dict), "Summary JSON root should be an object"
-
-
-def test_summary_has_required_keys():
-    """Test that the summary JSON contains all required top-level keys."""
-    with open("/app/output/summary.json", "r") as f:
-        data = json.load(f)
     required = {"by_region", "by_category", "total_revenue", "total_orders", "date_range"}
     missing = required - set(data.keys())
     assert not missing, f"Summary JSON missing keys: {missing}"
@@ -147,20 +126,14 @@ def test_summary_total_revenue_consistent():
     )
 
 
-def test_summary_region_revenue_sums_to_total():
-    """Test that sum of per-region revenues equals total_revenue."""
+def test_summary_region_revenue_and_orders_sum_correctly():
+    """Test that per-region revenues and orders sum to the totals."""
     with open("/app/output/summary.json", "r") as f:
         data = json.load(f)
     region_sum = sum(v["revenue"] for v in data["by_region"].values())
     assert abs(region_sum - data["total_revenue"]) < 0.01, (
         f"Sum of region revenues {region_sum:.2f} != total_revenue {data['total_revenue']}"
     )
-
-
-def test_summary_region_orders_sum_to_total():
-    """Test that sum of per-region orders equals total_orders."""
-    with open("/app/output/summary.json", "r") as f:
-        data = json.load(f)
     region_orders = sum(v["orders"] for v in data["by_region"].values())
     assert region_orders == data["total_orders"], (
         f"Sum of region orders {region_orders} != total_orders {data['total_orders']}"
@@ -182,8 +155,8 @@ def test_summary_date_range():
     )
 
 
-def test_summary_by_category_structure():
-    """Test that by_category is nested as region -> category -> revenue float."""
+def test_summary_by_category_structure_and_consistency():
+    """Test that by_category is nested correctly and sums match per-region revenue."""
     with open("/app/output/summary.json", "r") as f:
         data = json.load(f)
     by_cat = data["by_category"]
@@ -194,13 +167,6 @@ def test_summary_by_category_structure():
             assert isinstance(val, (int, float)), (
                 f"by_category[{region}][{cat}] should be numeric, got {type(val)}"
             )
-
-
-def test_summary_by_category_revenue_matches_region():
-    """Test that sum of category revenues per region matches that region total revenue."""
-    with open("/app/output/summary.json", "r") as f:
-        data = json.load(f)
-    for region, cats in data["by_category"].items():
         cat_sum = sum(cats.values())
         region_rev = data["by_region"][region]["revenue"]
         assert abs(cat_sum - region_rev) < 0.01, (
@@ -220,5 +186,4 @@ def test_handles_latin1_characters():
     """Test that products with special characters (like accented letters) are preserved in output."""
     with open("/app/output/cleaned.csv", "r", encoding="utf-8") as f:
         content = f.read()
-    # The latin-1 encoded e-acute should be present in some form (decoded properly)
     assert "Caf" in content, "Product with special characters should be present in output"

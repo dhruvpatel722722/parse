@@ -1,22 +1,20 @@
-There's a scrambled database dump at `/app/data/records.dat`. It was exported from a key-value store but something went wrong during the export — the records are mangled.
+There's a corrupted database export at `/app/data/records.dat`. The file contains mangled records from a key-value store that went through some kind of encoding pipeline before being written to disk.
 
-Your job is to write a recovery script at `/app/recover.py` that:
-1. Reads `/app/data/records.dat`
-2. Figures out how the data was scrambled
-3. Recovers the original records
-4. Writes the recovered data to `/app/output/recovered.json`
+Your job is to write `/app/recover.py` that recovers the original data and writes it to `/app/output/recovered.json`.
 
-The output must be a JSON array of objects, each with keys `id` (integer), `key` (string), and `value` (string), sorted by `id` ascending.
+The output must be a JSON array of objects with keys `id` (integer), `key` (string), `value` (string), sorted by `id` ascending. There are exactly 200 records with ids 0 through 199.
 
-Hints about the corruption:
-- The original records were serialized as fixed-width binary frames (each frame is exactly 128 bytes)
-- Each frame contains: 4-byte little-endian id, 32-byte null-padded key, 92-byte null-padded value
-- After serialization, a byte-level transformation was applied to the entire file
-- The transformation operates on 16-byte blocks independently
-- Within each block, bytes were permuted (reordered) using a fixed permutation pattern
-- The permutation pattern repeats every 16 bytes throughout the file
-- There are exactly 200 records in the original dataset
+What we know about the original data format:
+- Records were stored as fixed-width 128-byte frames (4-byte LE id, 32-byte null-padded key, 92-byte null-padded value)
+- Keys follow the pattern `word.word.NNN` where words are from a fixed vocabulary and NNN is the zero-padded id
+- Values contain structured text with fields like `data=`, `seq=`, and `hash=`
 
-Your script must determine the permutation, reverse it, then parse the frames. Write the result as JSON to `/app/output/recovered.json`.
+What we know about the corruption:
+- Two transformations were applied sequentially to the serialized byte stream
+- The first transformation operates on fixed-size blocks and shuffles byte positions within each block
+- The second transformation XORs each byte with a value derived from its position
+- Both transformations are deterministic and reversible
 
-Run your script after creating it: `python /app/recover.py`
+You must reverse-engineer both transformations by analyzing the binary patterns, then decode all 200 records. The vocabulary used for keys includes Greek letters and common tech terms.
+
+Run: `python /app/recover.py`

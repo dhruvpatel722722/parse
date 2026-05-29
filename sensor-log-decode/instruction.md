@@ -1,28 +1,26 @@
-A corrupted sensor log archive at `/app/data/sensorlog.dat` contains timestamped readings that were encoded by a faulty export module before being written to disk.
+A corrupted sensor log at `/app/data/sensorlog.dat` contains 300 timestamped readings that were mangled by a buggy export pipeline before being written to disk.
 
-Write `/app/extract.py` to decode the archive and produce `/app/output/readings.json`.
+Write `/app/extract.py` to recover the data and produce `/app/output/readings.json`.
 
-Output format — a JSON array of objects sorted by `seq` ascending:
+Output: JSON array of objects sorted by `seq`:
 ```
-[{"seq": <int>, "sensor": "<string>", "timestamp": "<ISO-8601>", "value": <float>}, ...]
+[{"seq": <int>, "sensor": "<name>", "timestamp": "<ISO-8601>", "value": <float>}, ...]
 ```
 
-There are exactly 300 records with sequential `seq` values starting from 0.
+About the original data:
+- 300 records with `seq` values 0 through 299
+- Each serialized as a 64-byte frame: 4-byte LE seq, 16-byte null-padded sensor name, 24-byte null-padded timestamp, 8-byte LE double value, 12 bytes padding (zeros)
+- Sensor names match pattern like `temp-A1`, `pressure-B3`, `flow-E2`
+- Timestamps are `2024-03-DDThh:mm:ssZ`
+- Values range 5 to 950
 
-What we know about the original record format:
-- Records were serialized as fixed-width 64-byte frames
-- Each frame: 4-byte LE sequence number, 16-byte null-padded sensor name, 24-byte null-padded ISO timestamp, 8-byte LE double (the reading value), 12 bytes padding
-- Sensor names are like `temp-A1`, `pressure-B3`, `humidity-C2` etc.
-- Timestamps are UTC in format `2024-MM-DDThh:mm:ssZ`
-- Values are physically plausible (range 0-1000)
+About the corruption:
+- Two byte-level transformations were applied sequentially to the raw serialized stream
+- One transformation is a repeating XOR cipher — the key length and content are unknown
+- The other transformation rearranges bytes within fixed-size blocks — both the block size and permutation are unknown
+- The order in which the transformations were applied is unknown
+- Neither transformation's parameters are stored anywhere in the file
 
-What we know about the encoding corruption:
-- Two transformations were applied sequentially to the serialized byte stream
-- The first transformation XORs each byte with a repeating key derived from the byte's position — the key length and values are unknown
-- The second transformation shuffles bytes within fixed-size blocks using an unknown permutation
-- Both transformations are deterministic and reversible
-- The block size for the permutation is NOT 16 — you must determine it
-
-You must reverse-engineer both transformations by analyzing patterns in the binary data, then decode all 300 records.
+You must analyze byte patterns to determine all unknown parameters (key, block size, permutation, and transformation order), then reverse both to recover the original records.
 
 Run: `python /app/extract.py`

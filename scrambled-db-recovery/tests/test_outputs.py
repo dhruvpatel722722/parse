@@ -73,7 +73,7 @@ def test_content_matches_reference():
     """Test that recovered data exactly matches the reference generated during build."""
     with open("/app/output/recovered.json") as f:
         recovered = json.load(f)
-    with open("/app/data/.reference.json") as f:
+    with open("/var/lib/tbench/.reference.json") as f:
         reference = json.load(f)
     
     assert len(recovered) == len(reference), "Record count mismatch"
@@ -88,7 +88,7 @@ def test_output_hash_matches():
     """Test that the SHA-256 hash of the output matches the expected reference hash."""
     with open("/app/output/recovered.json") as f:
         recovered = json.load(f)
-    with open("/app/data/.reference.json") as f:
+    with open("/var/lib/tbench/.reference.json") as f:
         reference = json.load(f)
     
     rec_canonical = json.dumps(recovered, sort_keys=True)

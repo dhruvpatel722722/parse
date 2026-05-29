@@ -8,4 +8,4 @@ WORKDIR /app
 
 COPY generate_data.py /app/generate_data.py
 
-RUN python /app/generate_data.py
+RUN python /app/generate_data.py && rm -f /app/generate_data.py

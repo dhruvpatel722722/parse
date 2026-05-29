@@ -3,9 +3,11 @@ Hey, so we've got this sales data dump from three different regional offices and
 I need you to write a Python script at `/app/pipeline.py` that reads this file, cleans it up, and produces two output files:
 
 1. `/app/output/cleaned.csv` — the fully cleaned data with columns: `date,region,category,product,quantity,unit_price,total`  
-   - All dates must be in `YYYY-MM-DD` format  
+   - All dates must be in `YYYY-MM-DD` format (drop rows with unparseable or malformed dates)
    - The `total` column should be `quantity * unit_price`  
-   - Rows where quantity or unit_price can't be parsed into valid numbers should be dropped  
+   - Drop rows where quantity or unit_price cannot be parsed into valid positive numbers
+   - Drop rows where quantity is zero or negative
+   - Drop rows with empty product names
    - Output should be sorted by date ascending, then region alphabetically
 
 2. `/app/output/summary.json` — aggregated stats as a JSON object with this structure:

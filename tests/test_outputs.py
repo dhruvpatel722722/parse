@@ -1,100 +1,87 @@
 import json
 import os
 import hashlib
+import re
 
 
-def test_recover_script_exists():
-    """Test that the recovery script was created."""
-    assert os.path.exists("/app/recover.py"), "recover.py does not exist"
+def test_extract_script_exists():
+    """Test that the extraction script was created."""
+    assert os.path.exists("/app/extract.py"), "extract.py does not exist"
 
 
 def test_output_file_exists():
-    """Test that the recovered JSON output was produced."""
-    assert os.path.exists("/app/output/recovered.json"), "recovered.json does not exist"
+    """Test that the readings JSON output was produced."""
+    assert os.path.exists("/app/output/readings.json"), "readings.json does not exist"
 
 
 def test_output_is_valid_json():
-    """Test that the output file contains valid parseable JSON."""
-    with open("/app/output/recovered.json") as f:
+    """Test that the output is a valid JSON array."""
+    with open("/app/output/readings.json") as f:
         data = json.load(f)
     assert isinstance(data, list), "Output should be a JSON array"
 
 
 def test_record_count():
-    """Test that exactly 200 records were recovered."""
-    with open("/app/output/recovered.json") as f:
+    """Test that exactly 300 records were extracted."""
+    with open("/app/output/readings.json") as f:
         data = json.load(f)
-    assert len(data) == 200, f"Expected 200 records, got {len(data)}"
+    assert len(data) == 300, f"Expected 300 records, got {len(data)}"
 
 
 def test_record_structure():
-    """Test that all records have the required id, key, and value fields."""
-    with open("/app/output/recovered.json") as f:
+    """Test that all records have seq, sensor, timestamp, and value fields."""
+    with open("/app/output/readings.json") as f:
         data = json.load(f)
     for i, rec in enumerate(data):
-        assert "id" in rec, f"Record {i} missing 'id'"
-        assert "key" in rec, f"Record {i} missing 'key'"
+        assert "seq" in rec, f"Record {i} missing 'seq'"
+        assert "sensor" in rec, f"Record {i} missing 'sensor'"
+        assert "timestamp" in rec, f"Record {i} missing 'timestamp'"
         assert "value" in rec, f"Record {i} missing 'value'"
-        assert isinstance(rec["id"], int), f"Record {i} id should be int"
-        assert isinstance(rec["key"], str), f"Record {i} key should be str"
-        assert isinstance(rec["value"], str), f"Record {i} value should be str"
 
 
-def test_records_sorted_by_id():
-    """Test that records are sorted by id in ascending order."""
-    with open("/app/output/recovered.json") as f:
+def test_sequential_ids():
+    """Test that seq values are 0-299 in order."""
+    with open("/app/output/readings.json") as f:
         data = json.load(f)
-    ids = [r["id"] for r in data]
-    assert ids == sorted(ids), "Records are not sorted by id"
-    assert ids == list(range(200)), "Record ids should be 0-199"
+    seqs = [r["seq"] for r in data]
+    assert seqs == list(range(300)), "Seq values should be 0-299 in order"
 
 
-def test_keys_have_expected_format():
-    """Test that recovered keys follow the word.word.NNN pattern."""
-    import re
-    with open("/app/output/recovered.json") as f:
+def test_sensor_names_valid():
+    """Test that sensor names match expected format."""
+    with open("/app/output/readings.json") as f:
         data = json.load(f)
-    pattern = re.compile(r'^[a-z]+\.[a-z]+\.\d{3}$')
+    pattern = re.compile(r'^(temp|pressure|humidity|flow|vibration)-[A-F]\d$')
     for rec in data:
-        assert pattern.match(rec["key"]), f"Key '{rec['key']}' doesn't match expected pattern"
+        assert pattern.match(rec["sensor"]), f"Invalid sensor name: {rec['sensor']}"
 
 
-def test_values_have_expected_format():
-    """Test that recovered values contain the expected data structure."""
-    with open("/app/output/recovered.json") as f:
+def test_timestamps_valid():
+    """Test that timestamps are valid ISO-8601 UTC format."""
+    with open("/app/output/readings.json") as f:
+        data = json.load(f)
+    pattern = re.compile(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$')
+    for rec in data:
+        assert pattern.match(rec["timestamp"]), f"Invalid timestamp: {rec['timestamp']}"
+
+
+def test_values_in_range():
+    """Test that all values are in the physically plausible range."""
+    with open("/app/output/readings.json") as f:
         data = json.load(f)
     for rec in data:
-        assert "data=" in rec["value"], f"Value missing 'data=' prefix: {rec['value'][:30]}"
-        assert "seq=" in rec["value"], f"Value missing 'seq=': {rec['value'][:50]}"
-        assert "hash=" in rec["value"], f"Value missing 'hash=': {rec['value'][:50]}"
+        assert 0 <= rec["value"] <= 1000, f"Value out of range: {rec['value']}"
 
 
 def test_content_matches_reference():
-    """Test that recovered data exactly matches the reference generated during build."""
-    with open("/app/output/recovered.json") as f:
-        recovered = json.load(f)
+    """Test that the output exactly matches the reference data."""
+    with open("/app/output/readings.json") as f:
+        output = json.load(f)
     with open("/var/lib/tbench/.reference.json") as f:
-        reference = json.load(f)
-    
-    assert len(recovered) == len(reference), "Record count mismatch"
-    
-    for i, (rec, ref) in enumerate(zip(recovered, reference)):
-        assert rec["id"] == ref["id"], f"Record {i} id mismatch"
-        assert rec["key"] == ref["key"], f"Record {i} key mismatch: got '{rec['key']}' expected '{ref['key']}'"
-        assert rec["value"] == ref["value"], f"Record {i} value mismatch at record {i}"
+        ref = json.load(f)
 
-
-def test_output_hash_matches():
-    """Test that the SHA-256 hash of the output matches the expected reference hash."""
-    with open("/app/output/recovered.json") as f:
-        recovered = json.load(f)
-    with open("/var/lib/tbench/.reference.json") as f:
-        reference = json.load(f)
-    
-    rec_canonical = json.dumps(recovered, sort_keys=True)
-    ref_canonical = json.dumps(reference, sort_keys=True)
-    
-    rec_hash = hashlib.sha256(rec_canonical.encode()).hexdigest()
-    ref_hash = hashlib.sha256(ref_canonical.encode()).hexdigest()
-    
-    assert rec_hash == ref_hash, "Output hash does not match reference"
+    out_str = json.dumps(output, sort_keys=True)
+    ref_str = json.dumps(ref, sort_keys=True)
+    assert hashlib.sha256(out_str.encode()).hexdigest() == hashlib.sha256(ref_str.encode()).hexdigest(), (
+        "Output does not match reference"
+    )

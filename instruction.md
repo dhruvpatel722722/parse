@@ -1,20 +1,26 @@
-There's a corrupted database export at `/app/data/records.dat`. The file contains mangled records from a key-value store that went through some kind of encoding pipeline before being written to disk.
+A corrupted sensor log at `/app/data/sensorlog.dat` contains 300 timestamped readings that were mangled by a buggy export pipeline before being written to disk.
 
-Your job is to write `/app/recover.py` that recovers the original data and writes it to `/app/output/recovered.json`.
+Write `/app/extract.py` to recover the data and produce `/app/output/readings.json`.
 
-The output must be a JSON array of objects with keys `id` (integer), `key` (string), `value` (string), sorted by `id` ascending. There are exactly 200 records with ids 0 through 199.
+Output: JSON array of objects sorted by `seq`:
+```
+[{"seq": <int>, "sensor": "<name>", "timestamp": "<ISO-8601>", "value": <float>}, ...]
+```
 
-What we know about the original data format:
-- Records were stored as fixed-width 128-byte frames (4-byte LE id, 32-byte null-padded key, 92-byte null-padded value)
-- Keys follow the pattern `word.word.NNN` where words are from a fixed vocabulary and NNN is the zero-padded id
-- Values contain structured text with fields like `data=`, `seq=`, and `hash=`
+About the original data:
+- 300 records with `seq` values 0 through 299
+- Each serialized as a 64-byte frame: 4-byte LE seq, 16-byte null-padded sensor name, 24-byte null-padded timestamp, 8-byte LE double value, 12 bytes padding (zeros)
+- Sensor names match pattern like `temp-A1`, `pressure-B3`, `flow-E2`
+- Timestamps are `2024-03-DDThh:mm:ssZ`
+- Values range 5 to 950
 
-What we know about the corruption:
-- Two transformations were applied sequentially to the serialized byte stream
-- The first transformation operates on fixed-size blocks and shuffles byte positions within each block
-- The second transformation XORs each byte with a value derived from its position
-- Both transformations are deterministic and reversible
+About the corruption:
+- Two byte-level transformations were applied sequentially to the raw serialized stream
+- One transformation is a repeating XOR cipher — the key length and content are unknown
+- The other transformation rearranges bytes within fixed-size blocks — both the block size and permutation are unknown
+- The order in which the transformations were applied is unknown
+- Neither transformation's parameters are stored anywhere in the file
 
-You must reverse-engineer both transformations by analyzing the binary patterns, then decode all 200 records. The vocabulary used for keys includes Greek letters and common tech terms.
+You must analyze byte patterns to determine all unknown parameters (key, block size, permutation, and transformation order), then reverse both to recover the original records.
 
-Run: `python /app/recover.py`
+Run: `python /app/extract.py`

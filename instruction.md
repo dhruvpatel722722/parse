@@ -1,20 +1,23 @@
-There's a corrupted database export at `/app/data/records.dat`. The file contains mangled records from a key-value store that went through some kind of encoding pipeline before being written to disk.
+A corrupted log archive is at `/app/data/cipher_log.bin` (9600 bytes). It contains 150 encoded monitoring log entries.
 
-Your job is to write `/app/recover.py` that recovers the original data and writes it to `/app/output/recovered.json`.
+Each original record is a 64-byte frame: 4-byte LE sequence ID (0-149), 8-byte null-padded category, 48-byte null-padded message, 4 bytes zero padding.
 
-The output must be a JSON array of objects with keys `id` (integer), `key` (string), `value` (string), sorted by `id` ascending. There are exactly 200 records with ids 0 through 199.
+Write `/app/recover.py` to decode and output `/app/output/recovered.json` — a JSON array of objects with `id` (integer), `category` (string), `message` (string), sorted by `id`.
 
-What we know about the original data format:
-- Records were stored as fixed-width 128-byte frames (4-byte LE id, 32-byte null-padded key, 92-byte null-padded value)
-- Keys follow the pattern `word.word.NNN` where words are from a fixed vocabulary and NNN is the zero-padded id
-- Values contain structured text with fields like `data=`, `seq=`, and `hash=`
+What is known about the corruption:
 
-What we know about the corruption:
-- Two transformations were applied sequentially to the serialized byte stream
-- The first transformation operates on fixed-size blocks and shuffles byte positions within each block
-- The second transformation XORs each byte with a value derived from its position
-- Both transformations are deterministic and reversible
+Two reversible transformations were applied to the raw byte stream:
 
-You must reverse-engineer both transformations by analyzing the binary patterns, then decode all 200 records. The vocabulary used for keys includes Greek letters and common tech terms.
+- The first transformation rearranges bytes across record boundaries. It operates on fixed-size groups and redistributes bytes from multiple source records into combined output blocks.
+
+- The second transformation modifies individual byte values using a circular bitwise operation. The operation is applied per fixed-size chunk and the shift parameter varies deterministically with chunk position in the stream.
+
+The second transformation was applied after the first. To decode, reverse them in opposite order.
+
+Categories are: auth, network, storage, compute, deploy, monitor, backup, sync, alert, config.
+
+Messages follow format: `action target ts=NNNNNNNN id=HHHHHHHHHHHH` where action is a past-tense verb, target is a node/service name, ts is a numeric timestamp, and id is a 12-char hex string.
+
+The bit operation chunk size divides evenly into the group size used by the first transformation. Both transformations preserve total byte count.
 
 Run: `python /app/recover.py`

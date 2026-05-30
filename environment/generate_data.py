@@ -1,71 +1,111 @@
 #!/usr/bin/env python3
-"""Generate scrambled database dump with two-layer obfuscation."""
+"""Generate interleaved cipher log data with two-layer obfuscation."""
 import os
 import struct
 import json
-import random
 import hashlib
-
-random.seed(12345)
 
 os.makedirs("/app/data", exist_ok=True)
 os.makedirs("/app/output", exist_ok=True)
 
-# Secret permutation for 16-byte blocks
-PERM = [11, 3, 14, 7, 0, 9, 5, 13, 2, 10, 6, 15, 8, 4, 1, 12]
+CATEGORIES = [
+    "auth", "network", "storage", "compute", "deploy",
+    "monitor", "backup", "sync", "alert", "config"
+]
 
-# Secret XOR key (32 bytes, repeating)
-XOR_KEY = bytes([0x5A, 0x3F, 0xC1, 0x87, 0x2E, 0x94, 0xD6, 0x1B,
-                 0xA8, 0x73, 0x4D, 0xF2, 0x69, 0xB5, 0x0E, 0xE7,
-                 0x31, 0xCC, 0x56, 0xAA, 0x7F, 0x18, 0xE3, 0x42,
-                 0x9D, 0x64, 0xBB, 0x05, 0xF8, 0x2C, 0x71, 0xD9])
+ACTIONS = [
+    "started", "completed", "failed", "retried", "timeout",
+    "blocked", "resumed", "cancelled", "queued", "verified"
+]
 
-WORDS = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta",
-         "iota", "kappa", "lambda", "mu", "nu", "xi", "omicron", "pi",
-         "rho", "sigma", "tau", "upsilon", "phi", "chi", "psi", "omega",
-         "config", "server", "client", "cache", "queue", "index", "route", "token"]
+TARGETS = [
+    "node-a", "node-b", "node-c", "node-d", "node-e",
+    "node-f", "node-g", "node-h", "cluster", "gateway"
+]
 
+
+def make_record(seq_id):
+    """Create a single 64-byte log record."""
+    # Layout: [4B seq_id LE][8B category null-padded][48B message null-padded][4B zero padding]
+    record = bytearray(64)
+
+    # Sequence ID (4 bytes, little-endian)
+    struct.pack_into('<I', record, 0, seq_id)
+
+    # Category (8 bytes, null-padded)
+    cat = CATEGORIES[seq_id % len(CATEGORIES)]
+    cat_bytes = cat.encode('utf-8')[:8]
+    record[4:4+len(cat_bytes)] = cat_bytes
+
+    # Message (48 bytes, null-padded)
+    action = ACTIONS[(seq_id * 3 + 1) % len(ACTIONS)]
+    target = TARGETS[(seq_id * 7 + 2) % len(TARGETS)]
+    ts_hash = hashlib.sha256(f"log-{seq_id}".encode()).hexdigest()[:12]
+    msg = f"{action} {target} ts={seq_id*1000+500:08d} id={ts_hash}"
+    msg_bytes = msg.encode('utf-8')[:48]
+    record[12:12+len(msg_bytes)] = msg_bytes
+
+    # Last 4 bytes: zero padding (already zero from bytearray init)
+    return record
+
+
+def rotate_left_byte(b, n):
+    """Rotate a single byte left by n bits."""
+    n = n % 8
+    return ((b << n) | (b >> (8 - n))) & 0xFF
+
+
+def rotate_right_byte(b, n):
+    """Rotate a single byte right by n bits."""
+    n = n % 8
+    return ((b >> n) | (b << (8 - n))) & 0xFF
+
+
+# Generate all 150 records
+NUM_RECORDS = 150
 records = []
-for i in range(200):
-    prefix = WORDS[i % len(WORDS)]
-    suffix = WORDS[(i * 7 + 3) % len(WORDS)]
-    key = f"{prefix}.{suffix}.{i:03d}"
-    
-    val_words = [WORDS[(i * 11 + j * 5) % len(WORDS)] for j in range(4)]
-    value = f"data={'.'.join(val_words)} seq={i:04d} hash={hashlib.md5(str(i).encode()).hexdigest()[:8]}"
-    
-    records.append({"id": i, "key": key, "value": value})
+for i in range(NUM_RECORDS):
+    records.append(make_record(i))
 
-# Serialize to fixed-width frames
-frames = bytearray()
-for rec in records:
-    frame = bytearray(128)
-    struct.pack_into('<I', frame, 0, rec["id"])
-    key_bytes = rec["key"].encode("utf-8")[:32]
-    frame[4:4+len(key_bytes)] = key_bytes
-    val_bytes = rec["value"].encode("utf-8")[:92]
-    frame[36:36+len(val_bytes)] = val_bytes
-    frames.extend(frame)
+# Save reference JSON
+reference = []
+for i, rec in enumerate(records):
+    seq_id = struct.unpack_from('<I', rec, 0)[0]
+    cat = rec[4:12].split(b'\x00')[0].decode('utf-8')
+    msg = rec[12:60].split(b'\x00')[0].decode('utf-8')
+    reference.append({"id": seq_id, "category": cat, "message": msg})
 
-# Layer 1: Apply permutation to each 16-byte block
-permuted = bytearray(len(frames))
-for block_start in range(0, len(frames), 16):
-    block = frames[block_start:block_start+16]
-    for i in range(16):
-        permuted[block_start + PERM[i]] = block[i]
-
-# Layer 2: XOR each byte with position-derived key
-xored = bytearray(len(permuted))
-for i in range(len(permuted)):
-    xored[i] = permuted[i] ^ XOR_KEY[i % len(XOR_KEY)]
-
-# Write final scrambled data
-with open("/app/data/records.dat", "wb") as f:
-    f.write(xored)
-
-# Write reference for testing (outside agent working tree)
 os.makedirs("/var/lib/tbench", exist_ok=True)
 with open("/var/lib/tbench/.reference.json", "w") as f:
-    json.dump(records, f, indent=2)
+    json.dump(reference, f, indent=2)
 
-print(f"Generated {len(records)} records, {len(xored)} bytes")
+# === LAYER 1: Byte-interleave adjacent record pairs ===
+# Records are processed in pairs (0,1), (2,3), (4,5), ...
+# Each pair produces a 128-byte interleaved block:
+#   output[2*i] = recordA[i], output[2*i+1] = recordB[i] for i in 0..63
+interleaved = bytearray()
+for pair_idx in range(NUM_RECORDS // 2):
+    rec_a = records[pair_idx * 2]
+    rec_b = records[pair_idx * 2 + 1]
+    block = bytearray(128)
+    for i in range(64):
+        block[2*i] = rec_a[i]
+        block[2*i + 1] = rec_b[i]
+    interleaved.extend(block)
+
+# === LAYER 2: Positional bit-rotation on 8-byte chunks ===
+# Each 8-byte chunk in the interleaved stream is rotated.
+# rotation_amount for chunk at global index c = (c * 5 + 3) % 8
+rotated = bytearray(len(interleaved))
+num_chunks = len(interleaved) // 8
+for c in range(num_chunks):
+    rot = (c * 5 + 3) % 8
+    for b in range(8):
+        rotated[c*8 + b] = rotate_left_byte(interleaved[c*8 + b], rot)
+
+# Write final obfuscated data
+with open("/app/data/cipher_log.bin", "wb") as f:
+    f.write(rotated)
+
+print(f"Generated {NUM_RECORDS} records, {len(rotated)} bytes")
+print(f"Reference saved to /var/lib/tbench/.reference.json")

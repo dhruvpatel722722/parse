@@ -6,8 +6,8 @@ author_email = "dhruvpatel722722@github.com"
 difficulty = "hard"
 category = "data-processing"
 tags = [ "coding", "reverse-engineering", "binary", "python" ]
-expert_time_estimate_min = 60
-junior_time_estimate_min = 300
+expert_time_estimate_min = 90
+junior_time_estimate_min = 360
 
 [verifier]
 timeout_sec = 1800.0

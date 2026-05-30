@@ -4,111 +4,129 @@ import struct, json, os, re
 from itertools import permutations as iterperms
 
 def main():
-    with open("/app/data/packets.bin", "rb") as f:
+    with open("/app/data/telemetry.bin", "rb") as f:
         data = bytearray(f.read())
 
-    NUM, FRAME, BLK, KLEN = 200, 128, 16, 32
+    NUM, FRAME, BLK, KLEN = 250, 91, 13, 37
+    STEP = KLEN  # Frames STEP apart share key alignment (since gcd(91,37)=1)
+    null = b'\x00'
 
-    # Phase 1: Recover XOR key from all-zero blocks (bytes 96-127).
-    key = bytearray(KLEN)
+    # Phase 1: Find pos0 (permuted position holding ID byte 0).
+    # XOR-diff between aligned frames (0 and 37) cancels the XOR key.
+    # At inv_perm[p]=0: diff = id_0 ^ id_37 = 0 ^ 37 = 37.
+    pos0 = None
     for p in range(BLK):
-        key[p] = data[96 + p]
-        key[(16 + p) % KLEN] = data[112 + p]
+        diff = data[p] ^ data[STEP * FRAME + p]
+        if diff == STEP:
+            if all(data[k*STEP*FRAME + p] ^ data[p] == k*STEP
+                   for k in range(1, min(6, NUM // STEP))):
+                pos0 = p
+                break
 
-    # Phase 2: Remove XOR key.
+    # Positions constant across aligned pairs in block 0 -> inv in {1,2,3}
+    always_zero_b0 = []
+    for p in range(BLK):
+        if p == pos0:
+            continue
+        if all(data[p] ^ data[k*STEP*FRAME + p] == 0
+               for k in range(1, min(7, NUM // STEP))):
+            always_zero_b0.append(p)
+
+    # Phase 2: Recover XOR key from known-zero positions across multiple frames.
+    # Bytes 1-3 of ID are always 0 for ids < 256. These map to always_zero_b0.
+    # Using different frames gives different key offsets (since gcd(91,37)=1).
+    key = bytearray(KLEN)
+    key_known = [False] * KLEN
+
+    # Frame 0: pos0 also has orig=0 (id=0)
+    for p in [pos0] + always_zero_b0:
+        key[p % KLEN] = data[p]
+        key_known[p % KLEN] = True
+
+    # Cycle through frames to fill all 37 key positions
+    for frame_idx in range(min(KLEN, NUM)):
+        frame_off = frame_idx * FRAME
+        for p in always_zero_b0:
+            kpos = (frame_off + p) % KLEN
+            if not key_known[kpos]:
+                key[kpos] = data[frame_off + p]
+                key_known[kpos] = True
+        if all(key_known):
+            break
+
+    # Phase 3: Decrypt
     dec = bytearray(len(data))
     for i in range(len(data)):
         dec[i] = data[i] ^ key[i % KLEN]
 
-    # Phase 3: Classify permutation positions.
-    pos0 = None
-    for p in range(BLK):
-        if all(dec[i * FRAME + p] == i for i in range(NUM)):
-            pos0 = p
-            break
-
-    azb0 = [p for p in range(BLK)
-             if p != pos0 and all(dec[i*FRAME+p] == 0 for i in range(NUM))]
-
-    const_b2 = {}
-    for p in range(BLK):
-        val = dec[2*BLK + p]
-        if all(dec[i*FRAME + 2*BLK + p] == val for i in range(NUM)):
-            const_b2[p] = val
-
-    # Phase 4: Assign known positions.
+    # Phase 4: Recover permutation from decrypted data.
     inv_perm = [None] * BLK
     inv_perm[pos0] = 0
+    for i, p in enumerate(sorted(always_zero_b0[:3])):
+        inv_perm[p] = i + 1
 
-    for p, v in const_b2.items():
-        if v == 116 and inv_perm[p] is None:
-            inv_perm[p] = 4; break
-    for p, v in const_b2.items():
-        if v == 115 and inv_perm[p] is None:
+    # Block 3 (bytes 39-51): field2 starts at byte 44, so block 3 positions 5-12
+    # hold field2[0:8] = "val=NNNN". Positions 5,6,7,8 are constant: v,a,l,=
+    b3_off = 3 * BLK
+    const_b3 = {}
+    for p in range(BLK):
+        val = dec[b3_off + p]
+        if all(dec[i*FRAME + b3_off + p] == val for i in range(NUM)):
+            const_b3[p] = val
+
+    for p, v in const_b3.items():
+        if v == 118 and inv_perm[p] is None:
             inv_perm[p] = 5; break
-    for p, v in const_b2.items():
-        if v == 61 and inv_perm[p] is None:
+    for p, v in const_b3.items():
+        if v == 97 and inv_perm[p] is None:
             inv_perm[p] = 6; break
+    for p, v in const_b3.items():
+        if v == 108 and inv_perm[p] is None:
+            inv_perm[p] = 7; break
+    for p, v in const_b3.items():
+        if v == 61 and inv_perm[p] is None:
+            inv_perm[p] = 8; break
 
-    # Group A: always-zero in block 0 -> values {1,2,3}
-    grp_A_pos = sorted(azb0[:3])
-    grp_A_vals = [1, 2, 3]
+    # Phase 5: Brute-force remaining positions with format validation.
+    pos_123 = sorted([p for p in range(BLK) if inv_perm[p] in (1, 2, 3)])
+    remaining_pos = sorted([p for p in range(BLK) if inv_perm[p] is None])
+    remaining_vals = sorted(set(range(BLK)) - set(v for v in inv_perm if v is not None))
+    ambiguous_pos = pos_123 + remaining_pos
+    ambiguous_vals = [1, 2, 3] + remaining_vals
 
-    # Group B: constant '0' (48) in block 2 -> values {7..12}
-    grp_B_pos = sorted([p for p, v in const_b2.items()
-                        if v == 48 and inv_perm[p] is None])
-    grp_B_vals = list(range(7, 7 + len(grp_B_pos)))
-
-    # Group C: remaining unassigned -> values {13,14,15}
-    grp_C_pos = sorted([p for p in range(BLK)
-                        if inv_perm[p] is None
-                        and p not in grp_A_pos
-                        and p not in grp_B_pos])
-    grp_C_vals = sorted(set(range(BLK)) - {0, 4, 5, 6}
-                        - set(grp_A_vals) - set(grp_B_vals))
-
-    # Phase 5: Brute-force with format validation.
-    pay_pat = re.compile(r'^ts=\d{12} len=\d{5} sig=[0-9a-f]{24}$')
-    src_pat = re.compile(r'^[a-z]+\.[a-z]+\.[0-9a-f]{8}$')
-    null = b'\x00'
+    f1_pat = re.compile(r'^[a-z][\w-]*\.[a-z]+\.[0-9a-f]{8}$')
+    f2_pat = re.compile(r'^val=\d{4}\.\d{2} ts=\d{10} chk=[0-9a-f]{12}$')
 
     best_inv = None
     best_score = -1
-    CHECK = [0, 1, 2, 3, 4]
+    CHECK = list(range(0, min(5 * STEP, NUM), STEP))
 
-    for pa in iterperms(grp_A_vals):
-        for pb in iterperms(grp_B_vals):
-            for pc in iterperms(grp_C_vals):
-                trial = inv_perm[:]
-                for p, v in zip(grp_A_pos, pa): trial[p] = v
-                for p, v in zip(grp_B_pos, pb): trial[p] = v
-                for p, v in zip(grp_C_pos, pc): trial[p] = v
-
-                score = 0
-                for fi in CHECK:
-                    orig = bytearray(FRAME)
-                    for bs in range(0, FRAME, BLK):
-                        for p in range(BLK):
-                            orig[bs + trial[p]] = dec[fi*FRAME + bs + p]
-                    pay = orig[36:124].split(null)[0]
-                    src = orig[4:36].split(null)[0]
-                    try:
-                        ps = pay.decode('ascii')
-                        ss = src.decode('ascii')
-                        if pay_pat.match(ps) and src_pat.match(ss):
-                            score += 1
-                        else:
-                            break
-                    except:
-                        break
-
-                if score > best_score:
-                    best_score = score
-                    best_inv = trial[:]
-                if score == len(CHECK):
+    for candidate in iterperms(ambiguous_vals):
+        trial = inv_perm[:]
+        for p, v in zip(ambiguous_pos, candidate):
+            trial[p] = v
+        score = 0
+        for fi in CHECK:
+            orig = bytearray(FRAME)
+            for bs in range(0, FRAME, BLK):
+                for p in range(BLK):
+                    orig[bs + trial[p]] = dec[fi * FRAME + bs + p]
+            f1 = orig[4:44].split(null)[0]
+            f2 = orig[44:88].split(null)[0]
+            try:
+                f1s = f1.decode('ascii')
+                f2s = f2.decode('ascii')
+                if f1_pat.match(f1s) and f2_pat.match(f2s):
+                    score += 1
+                else:
                     break
-            if best_score == len(CHECK): break
-        if best_score == len(CHECK): break
+            except:
+                break
+        if score > best_score:
+            best_score = score
+            best_inv = trial[:]
+        if score == len(CHECK):
+            break
 
     if best_inv:
         inv_perm = best_inv
@@ -123,9 +141,9 @@ def main():
     for fi in range(NUM):
         off = fi * FRAME
         rec_id = struct.unpack_from('<I', restored, off)[0]
-        src = restored[off+4:off+36].split(null)[0].decode('utf-8', errors='replace')
-        pay = restored[off+36:off+124].split(null)[0].decode('utf-8', errors='replace')
-        records.append({"id": rec_id, "source": src, "payload": pay})
+        f1 = restored[off+4:off+44].split(null)[0].decode('utf-8', errors='replace')
+        f2 = restored[off+44:off+88].split(null)[0].decode('utf-8', errors='replace')
+        records.append({"id": rec_id, "field1": f1, "field2": f2})
 
     records.sort(key=lambda r: r["id"])
     os.makedirs("/app/output", exist_ok=True)

@@ -1,51 +1,53 @@
 #!/usr/bin/env python3
-"""Generate obfuscated packet log with two-layer encoding."""
+"""Generate obfuscated telemetry archive with two interacting transformations."""
 import os
 import struct
 import json
 import random
 import hashlib
 
-random.seed(77777)
+random.seed(31415)
 
 os.makedirs("/app/data", exist_ok=True)
 os.makedirs("/app/output", exist_ok=True)
 
-PERM = [13, 5, 10, 1, 15, 8, 2, 4, 14, 0, 7, 6, 12, 9, 3, 11]
+# Secret permutation for 13-byte blocks
+PERM = [11, 10, 12, 3, 2, 5, 1, 6, 8, 0, 7, 4, 9]
 
-XOR_KEY = bytes([115, 120, 227, 187, 204, 255, 209, 39, 234, 15, 219, 203,
-                 182, 221, 93, 179, 91, 27, 94, 200, 78, 89, 196, 213,
-                 46, 240, 96, 225, 224, 241, 104, 79])
+# Secret XOR key (37 bytes, repeating)
+XOR_KEY = bytes([252, 202, 25, 107, 59, 179, 9, 140, 238, 124, 221, 129, 131,
+                 202, 106, 162, 220, 155, 139, 32, 161, 110, 142, 43, 10, 91,
+                 122, 129, 222, 49, 115, 226, 50, 59, 65, 238, 0])
 
-PROTOCOLS = ["tcp", "udp", "icmp", "dns", "http", "tls", "ssh", "ftp",
-             "smtp", "ntp", "dhcp", "arp", "bgp", "ospf", "snmp", "sip"]
+NODES = ["alpha-cluster", "beta-gateway", "gamma-worker", "delta-proxy",
+         "epsilon-cache", "zeta-storage", "eta-compute", "theta-broker",
+         "iota-monitor", "kappa-router", "lambda-queue", "mu-scheduler"]
 
-STATUSES = ["accepted", "rejected", "timeout", "retransmit", "redirect",
-            "filtered", "proxied", "cached", "dropped", "forwarded",
-            "throttled", "mirrored", "encrypted", "decrypted", "queued", "delivered"]
+CHANNELS = ["inbound", "outbound", "internal", "upstream", "downstream", "lateral"]
 
-NUM_RECORDS = 200
-FRAME_SIZE = 128
-PERM_BLOCK = 16
-XOR_KEY_LEN = 32
+NUM_RECORDS = 250
+FRAME_SIZE = 91
+PERM_BLOCK = 13
+XOR_KEY_LEN = 37
 
 records = []
 for i in range(NUM_RECORDS):
     frame = bytearray(FRAME_SIZE)
     struct.pack_into('<I', frame, 0, i)
 
-    proto = PROTOCOLS[i % len(PROTOCOLS)]
-    status = STATUSES[(i * 3 + 1) % len(STATUSES)]
-    h = hashlib.md5(f"pkt-{i}".encode()).hexdigest()[:8]
-    src = f"{proto}.{status}.{h}"
-    src_bytes = src.encode('utf-8')[:32]
-    frame[4:4+len(src_bytes)] = src_bytes
+    node = NODES[i % len(NODES)]
+    chan = CHANNELS[(i * 5 + 2) % len(CHANNELS)]
+    tag = hashlib.md5(f"d-{i}".encode()).hexdigest()[:8]
+    f1 = f"{node}.{chan}.{tag}"
+    f1_bytes = f1.encode('utf-8')[:40]
+    frame[4:4+len(f1_bytes)] = f1_bytes
 
-    ts = i * 1337 + 42
-    chk = hashlib.sha256(f"payload-{i}".encode()).hexdigest()[:24]
-    payload = f"ts={ts:012d} len={((i*7+13)%9000)+1000:05d} sig={chk}"
-    pay_bytes = payload.encode('utf-8')[:88]
-    frame[36:36+len(pay_bytes)] = pay_bytes
+    val = (i * 17 + 3) % 10000
+    ts = i * 500 + 1000000
+    chk = hashlib.sha256(f"chk-{i}".encode()).hexdigest()[:12]
+    f2 = f"val={val:04d}.{i%100:02d} ts={ts:010d} chk={chk}"
+    f2_bytes = f2.encode('utf-8')[:44]
+    frame[44:44+len(f2_bytes)] = f2_bytes
 
     records.append(frame)
 
@@ -53,9 +55,9 @@ for i in range(NUM_RECORDS):
 reference = []
 for frame in records:
     seq_id = struct.unpack_from('<I', frame, 0)[0]
-    src = frame[4:36].split(b'\x00')[0].decode('utf-8')
-    pay = frame[36:124].split(b'\x00')[0].decode('utf-8')
-    reference.append({"id": seq_id, "source": src, "payload": pay})
+    f1 = frame[4:44].split(b'\x00')[0].decode('utf-8')
+    f2 = frame[44:88].split(b'\x00')[0].decode('utf-8')
+    reference.append({"id": seq_id, "field1": f1, "field2": f2})
 
 os.makedirs("/var/lib/tbench", exist_ok=True)
 with open("/var/lib/tbench/.reference.json", "w") as f:
@@ -66,7 +68,7 @@ raw = bytearray()
 for frame in records:
     raw.extend(frame)
 
-# Layer 1: Permutation on 16-byte blocks
+# Layer 1: Permutation on 13-byte blocks
 permuted = bytearray(len(raw))
 for block_start in range(0, len(raw), PERM_BLOCK):
     block = raw[block_start:block_start + PERM_BLOCK]
@@ -78,7 +80,7 @@ xored = bytearray(len(permuted))
 for i in range(len(permuted)):
     xored[i] = permuted[i] ^ XOR_KEY[i % XOR_KEY_LEN]
 
-with open("/app/data/packets.bin", "wb") as f:
+with open("/app/data/telemetry.bin", "wb") as f:
     f.write(xored)
 
 print(f"Generated {NUM_RECORDS} records, {len(xored)} bytes")

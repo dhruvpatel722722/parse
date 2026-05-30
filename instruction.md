@@ -1,23 +1,21 @@
-A corrupted log archive is at `/app/data/cipher_log.bin` (9600 bytes). It contains 150 encoded monitoring log entries.
+A corrupted packet log is at `/app/data/packets.bin` (25600 bytes). It contains 200 encoded network monitoring entries that went through an encoding pipeline before being written to disk.
 
-Each original record is a 64-byte frame: 4-byte LE sequence ID (0-149), 8-byte null-padded category, 48-byte null-padded message, 4 bytes zero padding.
+Write `/app/recover.py` to decode and output `/app/output/recovered.json` — a JSON array of objects with `id` (integer), `source` (string), `payload` (string), sorted by `id`.
 
-Write `/app/recover.py` to decode and output `/app/output/recovered.json` — a JSON array of objects with `id` (integer), `category` (string), `message` (string), sorted by `id`.
+Each original record is a fixed 128-byte frame: 4-byte LE sequence ID (0-199), 32-byte null-padded source string, 88-byte null-padded payload string, and 4 bytes of zero padding at frame end.
 
 What is known about the corruption:
 
-Two reversible transformations were applied to the raw byte stream:
+Two deterministic reversible transformations were applied sequentially:
 
-- The first transformation rearranges bytes across record boundaries. It operates on fixed-size groups and redistributes bytes from multiple source records into combined output blocks.
+1. A fixed byte-position shuffle operates on equal-sized blocks throughout the stream. The same reordering is applied to every block. The block size is a power of two but smaller than the frame size.
 
-- The second transformation modifies individual byte values using a circular bitwise operation. The operation is applied per fixed-size chunk and the shift parameter varies deterministically with chunk position in the stream.
+2. A repeating XOR mask is applied across the entire byte stream. The mask length does not equal the block size.
 
-The second transformation was applied after the first. To decode, reverse them in opposite order.
+The shuffle was applied first, then the XOR mask.
 
-Categories are: auth, network, storage, compute, deploy, monitor, backup, sync, alert, config.
+Source strings follow pattern `protocol.status.hexhash`. Payload strings follow `ts=NNNNNNNNNNNN len=NNNNN sig=HHHHHHHHHHHHHHHHHHHHHHHH`.
 
-Messages follow format: `action target ts=NNNNNNNN id=HHHHHHHHHHHH` where action is a past-tense verb, target is a node/service name, ts is a numeric timestamp, and id is a 12-char hex string.
-
-The bit operation chunk size divides evenly into the group size used by the first transformation. Both transformations preserve total byte count.
+The sequential IDs (0-199 as 4-byte LE) and the trailing zero-padding provide known plaintext. XOR-difference between frames at the same block offset cancels the mask, exposing relationships between the permuted original bytes — enabling recovery of both the shuffle pattern and the XOR mask.
 
 Run: `python /app/recover.py`

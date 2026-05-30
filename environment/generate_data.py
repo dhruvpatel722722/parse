@@ -1,111 +1,84 @@
 #!/usr/bin/env python3
-"""Generate interleaved cipher log data with two-layer obfuscation."""
+"""Generate obfuscated packet log with two-layer encoding."""
 import os
 import struct
 import json
+import random
 import hashlib
+
+random.seed(77777)
 
 os.makedirs("/app/data", exist_ok=True)
 os.makedirs("/app/output", exist_ok=True)
 
-CATEGORIES = [
-    "auth", "network", "storage", "compute", "deploy",
-    "monitor", "backup", "sync", "alert", "config"
-]
+PERM = [13, 5, 10, 1, 15, 8, 2, 4, 14, 0, 7, 6, 12, 9, 3, 11]
 
-ACTIONS = [
-    "started", "completed", "failed", "retried", "timeout",
-    "blocked", "resumed", "cancelled", "queued", "verified"
-]
+XOR_KEY = bytes([115, 120, 227, 187, 204, 255, 209, 39, 234, 15, 219, 203,
+                 182, 221, 93, 179, 91, 27, 94, 200, 78, 89, 196, 213,
+                 46, 240, 96, 225, 224, 241, 104, 79])
 
-TARGETS = [
-    "node-a", "node-b", "node-c", "node-d", "node-e",
-    "node-f", "node-g", "node-h", "cluster", "gateway"
-]
+PROTOCOLS = ["tcp", "udp", "icmp", "dns", "http", "tls", "ssh", "ftp",
+             "smtp", "ntp", "dhcp", "arp", "bgp", "ospf", "snmp", "sip"]
 
+STATUSES = ["accepted", "rejected", "timeout", "retransmit", "redirect",
+            "filtered", "proxied", "cached", "dropped", "forwarded",
+            "throttled", "mirrored", "encrypted", "decrypted", "queued", "delivered"]
 
-def make_record(seq_id):
-    """Create a single 64-byte log record."""
-    # Layout: [4B seq_id LE][8B category null-padded][48B message null-padded][4B zero padding]
-    record = bytearray(64)
+NUM_RECORDS = 200
+FRAME_SIZE = 128
+PERM_BLOCK = 16
+XOR_KEY_LEN = 32
 
-    # Sequence ID (4 bytes, little-endian)
-    struct.pack_into('<I', record, 0, seq_id)
-
-    # Category (8 bytes, null-padded)
-    cat = CATEGORIES[seq_id % len(CATEGORIES)]
-    cat_bytes = cat.encode('utf-8')[:8]
-    record[4:4+len(cat_bytes)] = cat_bytes
-
-    # Message (48 bytes, null-padded)
-    action = ACTIONS[(seq_id * 3 + 1) % len(ACTIONS)]
-    target = TARGETS[(seq_id * 7 + 2) % len(TARGETS)]
-    ts_hash = hashlib.sha256(f"log-{seq_id}".encode()).hexdigest()[:12]
-    msg = f"{action} {target} ts={seq_id*1000+500:08d} id={ts_hash}"
-    msg_bytes = msg.encode('utf-8')[:48]
-    record[12:12+len(msg_bytes)] = msg_bytes
-
-    # Last 4 bytes: zero padding (already zero from bytearray init)
-    return record
-
-
-def rotate_left_byte(b, n):
-    """Rotate a single byte left by n bits."""
-    n = n % 8
-    return ((b << n) | (b >> (8 - n))) & 0xFF
-
-
-def rotate_right_byte(b, n):
-    """Rotate a single byte right by n bits."""
-    n = n % 8
-    return ((b >> n) | (b << (8 - n))) & 0xFF
-
-
-# Generate all 150 records
-NUM_RECORDS = 150
 records = []
 for i in range(NUM_RECORDS):
-    records.append(make_record(i))
+    frame = bytearray(FRAME_SIZE)
+    struct.pack_into('<I', frame, 0, i)
 
-# Save reference JSON
+    proto = PROTOCOLS[i % len(PROTOCOLS)]
+    status = STATUSES[(i * 3 + 1) % len(STATUSES)]
+    h = hashlib.md5(f"pkt-{i}".encode()).hexdigest()[:8]
+    src = f"{proto}.{status}.{h}"
+    src_bytes = src.encode('utf-8')[:32]
+    frame[4:4+len(src_bytes)] = src_bytes
+
+    ts = i * 1337 + 42
+    chk = hashlib.sha256(f"payload-{i}".encode()).hexdigest()[:24]
+    payload = f"ts={ts:012d} len={((i*7+13)%9000)+1000:05d} sig={chk}"
+    pay_bytes = payload.encode('utf-8')[:88]
+    frame[36:36+len(pay_bytes)] = pay_bytes
+
+    records.append(frame)
+
+# Save reference
 reference = []
-for i, rec in enumerate(records):
-    seq_id = struct.unpack_from('<I', rec, 0)[0]
-    cat = rec[4:12].split(b'\x00')[0].decode('utf-8')
-    msg = rec[12:60].split(b'\x00')[0].decode('utf-8')
-    reference.append({"id": seq_id, "category": cat, "message": msg})
+for frame in records:
+    seq_id = struct.unpack_from('<I', frame, 0)[0]
+    src = frame[4:36].split(b'\x00')[0].decode('utf-8')
+    pay = frame[36:124].split(b'\x00')[0].decode('utf-8')
+    reference.append({"id": seq_id, "source": src, "payload": pay})
 
 os.makedirs("/var/lib/tbench", exist_ok=True)
 with open("/var/lib/tbench/.reference.json", "w") as f:
     json.dump(reference, f, indent=2)
 
-# === LAYER 1: Byte-interleave adjacent record pairs ===
-# Records are processed in pairs (0,1), (2,3), (4,5), ...
-# Each pair produces a 128-byte interleaved block:
-#   output[2*i] = recordA[i], output[2*i+1] = recordB[i] for i in 0..63
-interleaved = bytearray()
-for pair_idx in range(NUM_RECORDS // 2):
-    rec_a = records[pair_idx * 2]
-    rec_b = records[pair_idx * 2 + 1]
-    block = bytearray(128)
-    for i in range(64):
-        block[2*i] = rec_a[i]
-        block[2*i + 1] = rec_b[i]
-    interleaved.extend(block)
+# Serialize
+raw = bytearray()
+for frame in records:
+    raw.extend(frame)
 
-# === LAYER 2: Positional bit-rotation on 8-byte chunks ===
-# Each 8-byte chunk in the interleaved stream is rotated.
-# rotation_amount for chunk at global index c = (c * 5 + 3) % 8
-rotated = bytearray(len(interleaved))
-num_chunks = len(interleaved) // 8
-for c in range(num_chunks):
-    rot = (c * 5 + 3) % 8
-    for b in range(8):
-        rotated[c*8 + b] = rotate_left_byte(interleaved[c*8 + b], rot)
+# Layer 1: Permutation on 16-byte blocks
+permuted = bytearray(len(raw))
+for block_start in range(0, len(raw), PERM_BLOCK):
+    block = raw[block_start:block_start + PERM_BLOCK]
+    for i in range(PERM_BLOCK):
+        permuted[block_start + PERM[i]] = block[i]
 
-# Write final obfuscated data
-with open("/app/data/cipher_log.bin", "wb") as f:
-    f.write(rotated)
+# Layer 2: XOR with repeating key
+xored = bytearray(len(permuted))
+for i in range(len(permuted)):
+    xored[i] = permuted[i] ^ XOR_KEY[i % XOR_KEY_LEN]
 
-print(f"Generated {NUM_RECORDS} records, {len(rotated)} bytes")
-print(f"Reference saved to /var/lib/tbench/.reference.json")
+with open("/app/data/packets.bin", "wb") as f:
+    f.write(xored)
+
+print(f"Generated {NUM_RECORDS} records, {len(xored)} bytes")

@@ -4,6 +4,9 @@
 
 mkdir -p /logs/verifier
 
+# Install test dependencies
+pip install pytest==8.3.4 -q
+
 # Run the Python test suite
 pytest /app/tests/test_outputs.py -v
 exit_code=$?

@@ -1,0 +1,64 @@
+{
+  "segment_id": "segment_002",
+  "source_id": "node-beta",
+  "entries": [
+    {
+      "seq_id": 1,
+      "timestamp": 1001.0,
+      "source_id": "node-beta",
+      "payload": "replica sync initiated",
+      "checksum": 2798080794
+    },
+    {
+      "seq_id": 2,
+      "timestamp": 1003.0,
+      "source_id": "node-beta",
+      "payload": "index rebuild phase 1",
+      "checksum": 2311033916
+    },
+    {
+      "seq_id": 3,
+      "timestamp": 1004.5,
+      "source_id": "node-beta",
+      "payload": "compaction threshold at 80%",
+      "checksum": 2862224840
+    },
+    {
+      "seq_id": 4,
+      "timestamp": 1007.5,
+      "source_id": "node-beta",
+      "payload": "snapshot captured sst_00042",
+      "checksum": 3412287734
+    },
+    {
+      "seq_id": 5,
+      "timestamp": 1010.0,
+      "source_id": "node-alpha",
+      "payload": "listener bound to port 8080",
+      "checksum": 231785825
+    },
+    {
+      "seq_id": 6,
+      "timestamp": 1011.0,
+      "source_id": "node-beta",
+      "payload": "WAL rotation completed",
+      "checksum": 1025298586
+    },
+    {
+      "seq_id": 7,
+      "timestamp": 1013.0,
+      "source_id": "node-beta",
+      "payload": "gc freed 2.3GB heap space",
+      "checksum": 1402919254
+    },
+    {
+      "seq_id": 8,
+      "timestamp": 1014.0,
+      "source_id": "node-beta",
+      "payload": "replica sync completed",
+      "checksum": 3609175864
+    }
+  ],
+  "created_at": 1001.0,
+  "closed": true
+}

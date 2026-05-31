@@ -1,14 +1,31 @@
-# Scrambled Record Recovery
+# Fix Log Aggregation Pipeline
 
-A data file `/app/data.bin` (19200 bytes) contains 200 records of 96 bytes each that were scrambled by a two-layer process:
+## Background
 
-1. A fixed byte-position shuffle applied independently to consecutive fixed-size blocks within each record.
-2. A fixed repeating mask XORed across the shuffled result.
+A distributed log aggregation pipeline ingests entries from multiple source nodes via WAL segments and compacts them into a unified, deduplicated, temporally-ordered output. The pipeline recently started producing incorrect output after a refactoring.
 
-Each original record had:
-- A calibration header occupying the first block, where byte `i` follows `(record_index * M[i] + O[i]) mod 256` with multipliers `M = [23, 1, 41, 7, 31, 11, 3, 37, 29, 13, 19, 17]` and unknown offsets O.
-- 12 null bytes (`0x00`) at the end (occupying the last block).
+## Symptoms
 
-Note: the mask repeats with a period that is a multiple of the block size but not necessarily equal to it. Both the block size and the mask period must be determined from the data.
+1. **Ordering anomalies** — entries from different sources that share the same timestamp appear in non-deterministic order
+2. **Duplicate entries** — certain entries that should be caught by the dedup window are leaking through
+3. **Incomplete index** — range queries on the temporal index return fewer entries than expected
+4. **Sequence conflicts after crash recovery** — when resuming from a checkpoint, new sequence IDs overlap with previously emitted entries
 
-Recover all 200 original records in order and write them to `/app/recovered.bin` (19200 bytes).
+## System Layout
+
+Source code is in `/app/environment/src/`:
+- `models.py` — Data structures (LogEntry, WALSegment, Checkpoint, CompactedOutput)
+- `wal_reader.py` — Loads WAL segment files from disk
+- `merger.py` — K-way merge of segments into temporal order
+- `dedup_engine.py` — Sliding-window deduplication
+- `temporal_index.py` — Time-based index for range queries
+- `compactor.py` — Orchestrates the full compaction pipeline
+- `recovery.py` — Crash recovery coordination
+
+Fixtures in `/app/environment/fixtures/` contain WAL segments from three source nodes with overlapping time ranges, plus a checkpoint representing an interrupted partial compaction.
+
+## Running Tests
+
+```bash
+cd /app && pytest tests/ -v
+```

@@ -1,17 +1,10 @@
-FROM ghcr.io/laude-institute/t-bench/python-3-13:20250620
+FROM python:3.11-slim
 
 WORKDIR /app
 
-RUN pip install pytest==8.3.4
+RUN pip install --no-cache-dir uv && uv pip install --system pytest
 
-COPY generate_data.py /app/generate_data.py
-RUN python /app/generate_data.py && rm -f /app/generate_data.py
+COPY src/ /app/environment/src/
+COPY fixtures/ /app/environment/fixtures/
 
-COPY instruction.md /app/instruction.md
-COPY test.sh /app/tests/test.sh
-COPY test_outputs.py /app/tests/test_outputs.py
-RUN chmod +x /app/tests/test.sh
-
-RUN test -f /app/data.bin && \
-    test -f /var/lib/tbench/.reference.json && \
-    test ! -f /app/generate_data.py
+WORKDIR /app

@@ -1,0 +1,64 @@
+{
+  "segment_id": "segment_001",
+  "source_id": "node-alpha",
+  "entries": [
+    {
+      "seq_id": 10,
+      "timestamp": 1000.0,
+      "source_id": "node-alpha",
+      "payload": "boot sequence initiated",
+      "checksum": 249942574
+    },
+    {
+      "seq_id": 11,
+      "timestamp": 1002.5,
+      "source_id": "node-alpha",
+      "payload": "config loaded successfully",
+      "checksum": 664980539
+    },
+    {
+      "seq_id": 12,
+      "timestamp": 1005.0,
+      "source_id": "node-alpha",
+      "payload": "listener bound to port 8080",
+      "checksum": 231785825
+    },
+    {
+      "seq_id": 13,
+      "timestamp": 1007.0,
+      "source_id": "node-alpha",
+      "payload": "accepted connection from 10.0.1.15",
+      "checksum": 2215487441
+    },
+    {
+      "seq_id": 14,
+      "timestamp": 1007.5,
+      "source_id": "node-alpha",
+      "payload": "heartbeat check nominal",
+      "checksum": 2037831988
+    },
+    {
+      "seq_id": 15,
+      "timestamp": 1009.0,
+      "source_id": "node-alpha",
+      "payload": "batch ingestion 150 records",
+      "checksum": 2418028250
+    },
+    {
+      "seq_id": 16,
+      "timestamp": 1010.0,
+      "source_id": "node-alpha",
+      "payload": "partition rebalance triggered",
+      "checksum": 1133315577
+    },
+    {
+      "seq_id": 17,
+      "timestamp": 1012.0,
+      "source_id": "node-alpha",
+      "payload": "checkpoint flush at offset 7",
+      "checksum": 3996669458
+    }
+  ],
+  "created_at": 1000.0,
+  "closed": true
+}

@@ -1,148 +1,168 @@
 #!/bin/bash
 cat > /app/recover.py << 'PYTHON'
 import struct, json, os
-from itertools import permutations as iterperms
+from itertools import permutations
 
 def main():
     with open("/app/data/records.dat", "rb") as f:
         data = bytearray(f.read())
 
-    NUM, FRAME, BLK, KLEN = 200, 128, 16, 32
+    NUM = 200       # number of records
+    FRAME = 128     # bytes per frame
+    BLK = 16        # block size for permutation
+    KLEN = 32       # XOR key length (repeating)
 
     # =========================================================================
-    # Known-plaintext recovery via XOR-difference permutation analysis.
-    # Known per frame (from instruction):
-    #   - Bytes 0-3: sequential ID as 4-byte LE (0..199)
-    #   - Bytes 116-127: 12 bytes zero padding
-    # Structural knowledge (from instruction - values have data=, seq=, hash= fields):
-    #   - Values are < 60 chars, so frame bytes 96-127 are always zero
-    # Encoding: permute 16-byte blocks, then XOR with 32-byte repeating key.
+    # Known-plaintext attack using frame structure:
+    #
+    # Frame layout (128 bytes):
+    #   [0:4]    = 4-byte LE sequential id (0..199)
+    #   [4:36]   = 32-byte null-padded key (format: word.word.NNN, max ~17 chars)
+    #   [36:128] = 92-byte null-padded value (format: data=... seq=NNNN hash=..., max ~57 chars)
+    #
+    # Since values are at most ~60 chars, frame bytes 96-127 are ALWAYS zero.
+    # These correspond to blocks 6 (bytes 96-111) and 7 (bytes 112-127).
+    #
+    # Encoding order: permute 16-byte blocks FIRST, then XOR with 32-byte key.
+    # Decoding order: undo XOR first, then undo permutation.
+    #
+    # PHASE 1: Recover XOR key from all-zero blocks.
+    #   Permuting all-zeros yields all-zeros.
+    #   encrypted[i] = 0 XOR key[i%32] = key[i%32]
+    #   Block 6 at offset 96 (96%32=0): reveals key[0:16]
+    #   Block 7 at offset 112 (112%32=16): reveals key[16:32]
+    #
+    # PHASE 2: Recover permutation using structural constraints.
+    #   After XOR removal, data is permuted. Use known byte patterns:
+    #   - Block 0: bytes 0-3 = LE id, bytes 4-15 = key prefix
+    #   - Block 2 (frame bytes 32-47): bytes 32-35 = key padding (zeros),
+    #     bytes 36-47 = value[0:12] which always starts with "data=" (constant chars)
+    #   These give us enough constraints to identify most PERM entries, with
+    #   a small brute-force (max 60480 trials) for the remainder.
     # =========================================================================
 
-    # === PHASE 1: Recover XOR key ===
-    # Blocks 6-7 (frame bytes 96-127) are all zero before obfuscation.
-    # Permuting zeros yields zeros, so after XOR: data[off+p] = KEY[(off+p)%32]
-    # Block 6 (offset 96, 96%32=0): gives key[0:16]
-    # Block 7 (offset 112, 112%32=16): gives key[16:32]
+    # === PHASE 1: Recover XOR key from zero-padded blocks ===
     key = bytearray(KLEN)
     for p in range(BLK):
-        key[p] = data[96 + p]
-        key[(16 + p) % KLEN] = data[112 + p]
+        key[p] = data[96 + p]          # block 6: key positions 0-15
+        key[16 + p] = data[112 + p]    # block 7: key positions 16-31
 
-    # === PHASE 2: Remove XOR key ===
+    # === PHASE 2: Remove XOR from all data ===
     dec = bytearray(len(data))
     for i in range(len(data)):
         dec[i] = data[i] ^ key[i % KLEN]
-    # Now: dec[blk_start + p] = original[blk_start + inv_perm[p]]
+    # Now: dec[frame_off + blk*16 + PERM[i]] = original[frame_off + blk*16 + i]
 
+    # === PHASE 3: Identify known permutation entries ===
 
-    # === PHASE 3: Recover permutation structure ===
-    # Block 0: orig[0]=id (varies 0..199), orig[1-3]=0 (ids<256), orig[4-15]=key chars
-    # After XOR removal, dec[frame_i + p] = orig_frame_i[inv_perm[p]]
-
-    # Find position where inv_perm[p]=0 (holds the sequential ID for each frame)
-    pos0 = None
-    for p in range(BLK):
-        if all(dec[i * FRAME + p] == i for i in range(NUM)):
-            pos0 = p
+    # PERM[0]: position in block 0 that holds the frame id (0..199)
+    perm0 = None
+    for pos in range(BLK):
+        if all(dec[f * FRAME + pos] == f for f in range(NUM)):
+            perm0 = pos
             break
 
-    # Positions always zero in block 0 across all frames -> inv_perm in {1,2,3}
-    always_zero_b0 = [p for p in range(BLK)
-                      if p != pos0 and all(dec[i*FRAME+p] == 0 for i in range(NUM))]
+    # Positions always-zero in block 0: candidates for PERM[1,2,3]
+    # (since ids < 256, the upper 3 bytes of the 4-byte LE id are always 0)
+    always_zero_b0 = [pos for pos in range(BLK)
+                      if pos != perm0 and all(dec[f*FRAME+pos] == 0 for f in range(NUM))]
 
-    # Block 1 (frame bytes 16-31 = key field bytes 12-27):
-    # Keys are max 17 chars, so key_field[17:] = 0, i.e., frame bytes 21+ = 0.
-    # Original positions 5-15 in block 1 -> frame bytes 21-31 -> always zero.
-    # Positions always zero in block 1 -> inv_perm >= 5
-    always_zero_b1 = [p for p in range(BLK)
-                      if all(dec[i*FRAME + BLK + p] == 0 for i in range(NUM))]
-    # Positions NOT always zero in block 1 -> inv_perm in {0,1,2,3,4}
-    not_zero_b1 = [p for p in range(BLK) if p not in always_zero_b1]
+    # Block 2 analysis (frame bytes 32-47):
+    # Original positions 0-3 in block 2 = frame bytes 32-35 = key[28:32] = always 0
+    # Original position 4 = frame byte 36 = value[0] = 'd' (100)
+    # Original position 5 = value[1] = 'a' (97)
+    # Original position 6 = value[2] = 't' (116)
+    # Original position 7 = value[3] = 'a' (97)
+    # Original position 8 = value[4] = '=' (61)
+    # Original positions 9-15 = value[5:12] (variable word characters)
 
-    # Block 2 (frame bytes 32-47): orig 0-3 -> frame bytes 32-35 (key padding, always 0)
-    # orig 4-15 -> frame bytes 36-47 = value prefix "data=..." (first 5 chars constant)
-    const_b2 = {}
-    for p in range(BLK):
-        val = dec[2*BLK + p]
-        if all(dec[i*FRAME + 2*BLK + p] == val for i in range(NUM)):
-            const_b2[p] = val
+    # Find positions with constant values in block 2
+    const_zero_b2 = [pos for pos in range(BLK)
+                     if all(dec[f*FRAME+32+pos] == 0 for f in range(NUM))]
 
+    const_val_b2 = {}
+    for pos in range(BLK):
+        vals = set(dec[f * FRAME + 32 + pos] for f in range(NUM))
+        if len(vals) == 1:
+            const_val_b2[pos] = vals.pop()
 
-    # === PHASE 4: Assign fixed permutation positions ===
-    inv_perm = [None] * BLK
-    inv_perm[pos0] = 0
+    # Identify specific PERM entries from block 2 constants
+    pos_d = [p for p, v in const_val_b2.items() if v == 100]   # 'd' -> PERM[4]
+    pos_t = [p for p, v in const_val_b2.items() if v == 116]   # 't' -> PERM[6]
+    pos_eq = [p for p, v in const_val_b2.items() if v == 61]   # '=' -> PERM[8]
+    pos_a = [p for p, v in const_val_b2.items() if v == 97]    # 'a' -> PERM[5] and PERM[7]
 
-    # Position in not_zero_b1 (inv<=4) that isn't pos0 or always_zero_b0: must be inv=4
-    # pos0 has inv=0, always_zero_b0 have inv in {1,2,3}
-    pos4 = [p for p in not_zero_b1 if p != pos0 and p not in always_zero_b0]
-    if len(pos4) == 1:
-        inv_perm[pos4[0]] = 4
-    else:
-        # Fallback: find via block 2 constant = 100 ('d' from "data=")
-        for p, v in const_b2.items():
-            if v == 100 and inv_perm[p] is None:
-                inv_perm[p] = 4
-                break
+    # PERM[1,2,3]: intersection of always_zero_b0 and const_zero_b2
+    # (positions that are zero in both block 0 and block 2 must be id-high-bytes)
+    perm123_positions = [p for p in always_zero_b0 if p in const_zero_b2]
 
-    # From block 2 constants: 116='t'->inv 6, 61='='->inv 8, 97='a'->inv 5 or 7
-    for p, v in const_b2.items():
-        if v == 116 and inv_perm[p] is None:
-            inv_perm[p] = 6; break
-    for p, v in const_b2.items():
-        if v == 61 and inv_perm[p] is None:
-            inv_perm[p] = 8; break
+    # Build the fixed assignments we're confident about
+    fixed = {}
+    fixed[0] = perm0
+    if pos_d: fixed[4] = pos_d[0]
+    if pos_t: fixed[6] = pos_t[0]
+    if pos_eq: fixed[8] = pos_eq[0]
 
-    # Two positions with const 97 -> inv 5 and 7
-    aa = [p for p, v in const_b2.items() if v == 97 and inv_perm[p] is None]
-    if len(aa) >= 2:
-        # Distinguish using block 3 unique value count (more unique = earlier in value)
-        uniq = {p: len(set(dec[i*FRAME + 3*BLK + p] for i in range(NUM))) for p in aa}
-        s = sorted(aa, key=lambda p: -uniq[p])
-        inv_perm[s[0]] = 5
-        inv_perm[s[1]] = 7
-    elif len(aa) == 1:
-        inv_perm[aa[0]] = 5 if 5 not in set(inv_perm) else 7
+    # Positions assigned to groups for brute force
+    group_123_positions = perm123_positions[:3]  # PERM[1,2,3] - order unknown (3! = 6)
+    group_57_positions = pos_a[:2]               # PERM[5,7] - order unknown (2! = 2)
 
-    # Assign {1,2,3} to always_zero_b0 positions (tentative order)
-    pos123 = [p for p in always_zero_b0 if inv_perm[p] is None][:3]
-    for i, p in enumerate(sorted(pos123)):
-        inv_perm[p] = i + 1
+    # Remaining positions for PERM[9..15]
+    all_assigned = set(fixed.values()) | set(group_123_positions) | set(group_57_positions)
+    group_rest_positions = sorted([p for p in range(BLK) if p not in all_assigned])
 
-
-    # === PHASE 5: Brute-force remaining positions using seq/hash validation ===
-    # Remaining: positions in always_zero_b1 not yet assigned -> inv in {9..15}
-    # Plus resolve correct order of {1,2,3} and {5,7}
-    
-    # Identify groups
-    pos_group_123 = sorted([p for p in range(BLK) if inv_perm[p] in (1,2,3)])
-    pos_group_57 = sorted([p for p in range(BLK) if inv_perm[p] in (5,7)])
-    pos_group_rest = sorted([p for p in range(BLK) if inv_perm[p] is None])
-    vals_rest = sorted(set(range(BLK)) - set(v for v in inv_perm if v is not None))
-
-    # Combined brute-force: 3! * 2! * 7! = 60480 (fast enough)
-    best_inv = None
+    # === PHASE 4: Brute-force remaining assignments (max 6*2*5040 = 60480 trials) ===
+    best_perm = None
     best_score = -1
-    CHECK_FRAMES = [0, 1, 2, 3, 4]
 
-    for pa in iterperms([1,2,3]):
-        for pb in iterperms([5,7]):
-            for pc in iterperms(vals_rest):
-                trial = inv_perm[:]
-                for p, v in zip(pos_group_123, pa): trial[p] = v
-                for p, v in zip(pos_group_57, pb): trial[p] = v
-                for p, v in zip(pos_group_rest, pc): trial[p] = v
+    for p123 in permutations(group_123_positions):
+        for p57 in permutations(group_57_positions):
+            for prest in permutations(group_rest_positions):
+                trial_perm = [None] * BLK
+                trial_perm[0] = fixed[0]
+                trial_perm[1], trial_perm[2], trial_perm[3] = p123
+                trial_perm[4] = fixed[4]
+                trial_perm[5], trial_perm[7] = p57
+                trial_perm[6] = fixed[6]
+                trial_perm[8] = fixed[8]
+                trial_perm[9], trial_perm[10], trial_perm[11] = prest[0], prest[1], prest[2]
+                trial_perm[12], trial_perm[13], trial_perm[14], trial_perm[15] = prest[3], prest[4], prest[5], prest[6]
 
+                # Compute inverse permutation
+                inv_perm = [0] * BLK
+                for i in range(BLK):
+                    inv_perm[trial_perm[i]] = i
+
+                # Quick validation: check frame 0 and frame 1 ids
+                orig_b0 = [0] * BLK
+                for p in range(BLK):
+                    orig_b0[inv_perm[p]] = dec[p]
+                if orig_b0[0] != 0 or orig_b0[1] != 0 or orig_b0[2] != 0 or orig_b0[3] != 0:
+                    continue
+
+                orig_b0_f1 = [0] * BLK
+                for p in range(BLK):
+                    orig_b0_f1[inv_perm[p]] = dec[FRAME + p]
+                if orig_b0_f1[0] != 1 or orig_b0_f1[1] != 0 or orig_b0_f1[2] != 0 or orig_b0_f1[3] != 0:
+                    continue
+
+                # Full validation: decode first 5 frames and check value structure
                 score = 0
-                for fi in CHECK_FRAMES:
-                    orig = bytearray(FRAME)
-                    for bs in range(0, FRAME, BLK):
+                for f in range(5):
+                    orig_frame = bytearray(FRAME)
+                    for blk_idx in range(FRAME // BLK):
+                        blk_off = f * FRAME + blk_idx * BLK
                         for p in range(BLK):
-                            orig[bs + trial[p]] = dec[fi*FRAME + bs + p]
-                    v = orig[36:128].split(b'\x00')[0]
+                            orig_frame[blk_idx * BLK + inv_perm[p]] = dec[blk_off + p]
+
+                    rec_id = struct.unpack_from('<I', orig_frame, 0)[0]
+                    if rec_id != f:
+                        break
+
+                    value = orig_frame[36:128].split(b'\x00')[0]
                     try:
-                        vs = v.decode('ascii')
-                        if f"seq={fi:04d}" in vs and "hash=" in vs:
+                        vs = value.decode('ascii')
+                        if f"seq={f:04d}" in vs and "data=" in vs and "hash=" in vs:
                             score += 1
                         else:
                             break
@@ -151,29 +171,31 @@ def main():
 
                 if score > best_score:
                     best_score = score
-                    best_inv = trial[:]
-                if score == len(CHECK_FRAMES):
+                    best_perm = trial_perm[:]
+                if score >= 5:
                     break
-            if best_score == len(CHECK_FRAMES): break
-        if best_score == len(CHECK_FRAMES): break
+            if best_score >= 5:
+                break
+        if best_score >= 5:
+            break
 
-    if best_inv:
-        inv_perm = best_inv
-
-
-    # === PHASE 6: Apply inverse permutation and output ===
-    restored = bytearray(len(dec))
-    for blk_start in range(0, len(dec), BLK):
-        for p in range(BLK):
-            restored[blk_start + inv_perm[p]] = dec[blk_start + p]
+    # === PHASE 5: Decode all records using recovered permutation ===
+    inv_perm = [0] * BLK
+    for i in range(BLK):
+        inv_perm[best_perm[i]] = i
 
     records = []
-    for fi in range(NUM):
-        off = fi * FRAME
-        rec_id = struct.unpack_from('<I', restored, off)[0]
-        k = restored[off+4:off+36].split(b'\x00')[0].decode('utf-8', errors='replace')
-        v = restored[off+36:off+128].split(b'\x00')[0].decode('utf-8', errors='replace')
-        records.append({"id": rec_id, "key": k, "value": v})
+    for f in range(NUM):
+        orig_frame = bytearray(FRAME)
+        for blk_idx in range(FRAME // BLK):
+            blk_off = f * FRAME + blk_idx * BLK
+            for p in range(BLK):
+                orig_frame[blk_idx * BLK + inv_perm[p]] = dec[blk_off + p]
+
+        rec_id = struct.unpack_from('<I', orig_frame, 0)[0]
+        key_str = orig_frame[4:36].split(b'\x00')[0].decode('utf-8', errors='replace')
+        val_str = orig_frame[36:128].split(b'\x00')[0].decode('utf-8', errors='replace')
+        records.append({"id": rec_id, "key": key_str, "value": val_str})
 
     records.sort(key=lambda r: r["id"])
 
@@ -181,7 +203,7 @@ def main():
     with open("/app/output/recovered.json", "w") as f:
         json.dump(records, f, indent=2)
 
-    print(f"Recovered {len(records)} records")
+    print(f"Recovered {len(records)} records successfully")
 
 if __name__ == "__main__":
     main()

@@ -1,134 +1,81 @@
 #!/usr/bin/env python3
-"""
-Generate obfuscated telemetry stream data.
+"""Generate scrambled sensor readings."""
+import json, os, struct, hashlib, random
 
-Each frame is 64 bytes of plaintext, transformed by:
-  1. A fixed 16-byte block permutation (applied to each 16-byte chunk)
-  2. A 32-byte XOR key (applied cyclically across the 64-byte frame)
+READING_SIZE = 96
+BLOCK_SIZE = 12
+NUM_READINGS = 200
+KEY_SIZE = 12
+MULT = [1, 3, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41]
+OFF = [0, 50, 100, 150, 200, 25, 75, 125, 175, 225, 10, 60]
 
-Plaintext frame layout (64 bytes):
-  [0:16]  - Header: 16 bytes, each derived from frame sequence number
-            byte[i] = (seq * multiplier[i] + offset[i]) % 256
-            multipliers: [1,3,5,7,11,13,17,19,23,29,31,37,41,43,47,53]
-            offsets:     [0,100,200,50,150,75,125,175,225,25,60,90,110,130,160,190]
-  [16:48] - Sensor payload (pseudorandom)
-  [48:64] - Zero padding (16 null bytes = one full block)
+random.seed(0x53454E53)
 
-The 16 header bytes each have a unique linear relationship to the
-sequence number, so every byte position in the header block has a
-distinct XOR-difference fingerprint across frames.
+def gen_perm(n):
+    p = list(range(n))
+    random.shuffle(p)
+    return p
 
-Permutation: out[i] = block[perm[i]]
-XOR key: final[i] = permuted[i] ^ key[i % 32]
+def gen_key(n):
+    return bytes(random.randint(0, 255) for _ in range(n))
 
-Outputs:
-  /app/telemetry.bin            - 300 encrypted frames (19200 bytes)
-  /var/lib/tbench/.reference.json - verification data
-"""
-
-import json
-import os
-import struct
-import hashlib
-import random
-
-FRAME_SIZE = 64
-BLOCK_SIZE = 16
-NUM_FRAMES = 300
-XOR_KEY_SIZE = 32
-
-MULTIPLIERS = [1, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53]
-OFFSETS = [0, 100, 200, 50, 150, 75, 125, 175, 225, 25, 60, 90, 110, 130, 160, 190]
-
-random.seed(0x54454C33)
-
-
-def generate_permutation(size):
-    perm = list(range(size))
-    random.shuffle(perm)
-    return perm
-
-
-def generate_xor_key(size):
-    return bytes(random.randint(0, 255) for _ in range(size))
-
-
-def apply_permutation(data, perm):
-    """out[i] = data[perm[i]]"""
+def apply_perm(data, perm):
     out = bytearray(len(data))
     for i, p in enumerate(perm):
         out[i] = data[p]
     return bytes(out)
 
-
-def build_header(seq):
-    """Build 16-byte header from sequence number."""
-    return bytes((seq * m + o) % 256 for m, o in zip(MULTIPLIERS, OFFSETS))
-
-
-def encrypt_frame(plaintext, perm, xor_key):
-    assert len(plaintext) == FRAME_SIZE
+def scramble(plaintext, perm, key):
+    assert len(plaintext) == READING_SIZE
     permuted = bytearray()
-    for blk in range(0, FRAME_SIZE, BLOCK_SIZE):
-        block = plaintext[blk:blk + BLOCK_SIZE]
-        permuted.extend(apply_permutation(block, perm))
-    encrypted = bytearray(FRAME_SIZE)
-    for i in range(FRAME_SIZE):
-        encrypted[i] = permuted[i] ^ xor_key[i % XOR_KEY_SIZE]
-    return bytes(encrypted)
+    for b in range(0, READING_SIZE, BLOCK_SIZE):
+        permuted.extend(apply_perm(plaintext[b:b+BLOCK_SIZE], perm))
+    out = bytearray(READING_SIZE)
+    for i in range(READING_SIZE):
+        out[i] = permuted[i] ^ key[i % KEY_SIZE]
+    return bytes(out)
 
+def build_header(idx):
+    return bytes((idx * m + o) % 256 for m, o in zip(MULT, OFF))
 
-def build_plaintext_frame(frame_id):
-    header = build_header(frame_id)
-    payload = bytes(random.randint(0, 255) for _ in range(32))
-    padding = b'\x00' * 16
-    frame = header + payload + padding
-    assert len(frame) == FRAME_SIZE
-    return frame
-
+def build_reading(idx):
+    header = build_header(idx)
+    payload = bytes(random.randint(0, 255) for _ in range(72))
+    padding = b'\x00' * 12
+    return header + payload + padding
 
 def main():
-    perm = generate_permutation(BLOCK_SIZE)
-    xor_key = generate_xor_key(XOR_KEY_SIZE)
-
-    plaintext_frames = []
-    encrypted_frames = []
-
-    for i in range(NUM_FRAMES):
-        pt = build_plaintext_frame(i)
-        plaintext_frames.append(pt)
-        ct = encrypt_frame(pt, perm, xor_key)
-        encrypted_frames.append(ct)
+    perm = gen_perm(BLOCK_SIZE)
+    key = gen_key(KEY_SIZE)
+    pts, cts = [], []
+    for i in range(NUM_READINGS):
+        pt = build_reading(i)
+        pts.append(pt)
+        cts.append(scramble(pt, perm, key))
 
     os.makedirs('/app', exist_ok=True)
-    with open('/app/telemetry.bin', 'wb') as f:
-        for ct in encrypted_frames:
-            f.write(ct)
+    with open('/app/readings.bin', 'wb') as f:
+        for c in cts:
+            f.write(c)
 
-    frame_hashes = [hashlib.sha256(pt).hexdigest() for pt in plaintext_frames]
-    all_pt = b''.join(plaintext_frames)
-    full_hash = hashlib.sha256(all_pt).hexdigest()
-
-    reference = {
-        'num_frames': NUM_FRAMES,
-        'frame_size': FRAME_SIZE,
+    hashes = [hashlib.sha256(p).hexdigest() for p in pts]
+    full = hashlib.sha256(b''.join(pts)).hexdigest()
+    ref = {
+        'num_readings': NUM_READINGS,
+        'reading_size': READING_SIZE,
         'block_size': BLOCK_SIZE,
-        'xor_key_size': XOR_KEY_SIZE,
-        'full_plaintext_hash': full_hash,
-        'frame_hashes': frame_hashes,
+        'key_size': KEY_SIZE,
+        'full_hash': full,
+        'reading_hashes': hashes,
         'permutation': perm,
-        'xor_key': list(xor_key),
+        'xor_key': list(key),
+        'multipliers': MULT,
+        'offsets': OFF,
     }
-
     os.makedirs('/var/lib/tbench', exist_ok=True)
     with open('/var/lib/tbench/.reference.json', 'w') as f:
-        json.dump(reference, f)
-
-    print(f"Generated {NUM_FRAMES} frames -> /app/telemetry.bin")
-    print(f"Permutation: {perm}")
-    print(f"XOR key: {list(xor_key)}")
-    print(f"Full SHA256: {full_hash}")
-
+        json.dump(ref, f)
+    print(f"OK: perm={perm}, key_len={KEY_SIZE}, SHA256={full}")
 
 if __name__ == '__main__':
     main()

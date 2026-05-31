@@ -1,14 +1,14 @@
 version = "1.0"
 
 [metadata]
-name = "telemetry-stream-reconstruct"
-description = "Recover plaintext from a satellite telemetry stream obfuscated by block permutation and XOR masking"
+name = "stream-reconstruct"
+description = "Recover sensor readings from a binary stream scrambled by block-level byte shuffle and repeating XOR mask"
 category = "reverse_engineering"
-tags = ["cryptanalysis", "xor", "permutation", "known-plaintext"]
+tags = ["cryptanalysis", "binary", "permutation", "signal-processing"]
 author_name = "dhruvpatel"
 difficulty = "hard"
-expert_time_estimate_min = 30
-junior_time_estimate_min = 90
+expert_time_estimate_min = 45
+junior_time_estimate_min = 120
 
 [environment]
 allow_internet = true

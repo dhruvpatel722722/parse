@@ -1,28 +1,12 @@
-version = "1.0"
-
-[metadata]
-author_name = "dhruvpatel"
-author_email = "dhruvpatel722722@github.com"
+[task]
+id = "broken-package-resolver"
+name = "Broken Package Resolver"
+description = "Reconstruct the correct package installation order from a corrupted package manager database with version-conditional dependencies, mutual exclusion constraints, virtual provides, and epoch-based versioning."
 difficulty = "hard"
-category = "data-processing"
-tags = [ "coding", "reverse-engineering", "binary", "python" ]
-expert_time_estimate_min = 60
-junior_time_estimate_min = 300
-
-[verifier]
-timeout_sec = 1800.0
-
-[agent]
-timeout_sec = 1800.0
 
 [environment]
-build_timeout_sec = 600.0
-cpus = 1
-memory_mb = 2048
-storage_mb = 10240
-gpus = 0
 allow_internet = true
+timeout = 1800
 
-[verifier.env]
-
-[solution.env]
+[solution]
+script = "solution/solve.sh"

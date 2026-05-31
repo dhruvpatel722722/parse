@@ -1,100 +1,65 @@
 import json
 import os
-import hashlib
+import pytest
 
 
-def test_recover_script_exists():
-    """Test that the recovery script was created."""
-    assert os.path.exists("/app/recover.py"), "recover.py does not exist"
+def load_reference():
+    """Load the reference answer."""
+    ref_path = "/var/lib/tbench/.reference.json"
+    assert os.path.exists(ref_path), f"Reference file not found at {ref_path}"
+    with open(ref_path) as f:
+        return json.load(f)
 
 
-def test_output_file_exists():
-    """Test that the recovered JSON output was produced."""
-    assert os.path.exists("/app/output/recovered.json"), "recovered.json does not exist"
+def load_output():
+    """Load the agent's output."""
+    out_path = "/app/output/install_order.txt"
+    assert os.path.exists(out_path), f"Output file not found at {out_path}"
+    with open(out_path) as f:
+        lines = [line.strip() for line in f if line.strip()]
+    return lines
 
 
-def test_output_is_valid_json():
-    """Test that the output file contains valid parseable JSON."""
-    with open("/app/output/recovered.json") as f:
-        data = json.load(f)
-    assert isinstance(data, list), "Output should be a JSON array"
+class TestPackageResolver:
+    def test_output_exists(self):
+        """Check that output file was created."""
+        assert os.path.exists("/app/output/install_order.txt"), \
+            "Output file /app/output/install_order.txt not found"
 
+    def test_correct_package_count(self):
+        """Check that the correct number of packages are in the output."""
+        ref = load_reference()
+        output = load_output()
+        expected_count = ref["total_installed"]
+        assert len(output) == expected_count, \
+            f"Expected {expected_count} packages, got {len(output)}"
 
-def test_record_count():
-    """Test that exactly 200 records were recovered."""
-    with open("/app/output/recovered.json") as f:
-        data = json.load(f)
-    assert len(data) == 200, f"Expected 200 records, got {len(data)}"
+    def test_no_skipped_packages_in_output(self):
+        """Check that conflict-skipped packages are not in the output."""
+        ref = load_reference()
+        output = load_output()
+        for pkg in ref["skipped"]:
+            assert pkg not in output, \
+                f"Skipped package '{pkg}' should not be in output"
 
+    def test_exact_install_order(self):
+        """Check that the install order matches exactly."""
+        ref = load_reference()
+        output = load_output()
+        expected = ref["install_order"]
+        assert output == expected, \
+            f"Install order mismatch.\nExpected: {expected[:10]}...\nGot:      {output[:10]}..."
 
-def test_record_structure():
-    """Test that all records have the required id, key, and value fields."""
-    with open("/app/output/recovered.json") as f:
-        data = json.load(f)
-    for i, rec in enumerate(data):
-        assert "id" in rec, f"Record {i} missing 'id'"
-        assert "key" in rec, f"Record {i} missing 'key'"
-        assert "value" in rec, f"Record {i} missing 'value'"
-        assert isinstance(rec["id"], int), f"Record {i} id should be int"
-        assert isinstance(rec["key"], str), f"Record {i} key should be str"
-        assert isinstance(rec["value"], str), f"Record {i} value should be str"
-
-
-def test_records_sorted_by_id():
-    """Test that records are sorted by id in ascending order."""
-    with open("/app/output/recovered.json") as f:
-        data = json.load(f)
-    ids = [r["id"] for r in data]
-    assert ids == sorted(ids), "Records are not sorted by id"
-    assert ids == list(range(200)), "Record ids should be 0-199"
-
-
-def test_keys_have_expected_format():
-    """Test that recovered keys follow the word.word.NNN pattern."""
-    import re
-    with open("/app/output/recovered.json") as f:
-        data = json.load(f)
-    pattern = re.compile(r'^[a-z]+\.[a-z]+\.\d{3}$')
-    for rec in data:
-        assert pattern.match(rec["key"]), f"Key '{rec['key']}' doesn't match expected pattern"
-
-
-def test_values_have_expected_format():
-    """Test that recovered values contain the expected data structure."""
-    with open("/app/output/recovered.json") as f:
-        data = json.load(f)
-    for rec in data:
-        assert "data=" in rec["value"], f"Value missing 'data=' prefix: {rec['value'][:30]}"
-        assert "seq=" in rec["value"], f"Value missing 'seq=': {rec['value'][:50]}"
-        assert "hash=" in rec["value"], f"Value missing 'hash=': {rec['value'][:50]}"
-
-
-def test_content_matches_reference():
-    """Test that recovered data exactly matches the reference generated during build."""
-    with open("/app/output/recovered.json") as f:
-        recovered = json.load(f)
-    with open("/var/lib/tbench/.reference.json") as f:
-        reference = json.load(f)
-    
-    assert len(recovered) == len(reference), "Record count mismatch"
-    
-    for i, (rec, ref) in enumerate(zip(recovered, reference)):
-        assert rec["id"] == ref["id"], f"Record {i} id mismatch"
-        assert rec["key"] == ref["key"], f"Record {i} key mismatch: got '{rec['key']}' expected '{ref['key']}'"
-        assert rec["value"] == ref["value"], f"Record {i} value mismatch at record {i}"
-
-
-def test_output_hash_matches():
-    """Test that the SHA-256 hash of the output matches the expected reference hash."""
-    with open("/app/output/recovered.json") as f:
-        recovered = json.load(f)
-    with open("/var/lib/tbench/.reference.json") as f:
-        reference = json.load(f)
-    
-    rec_canonical = json.dumps(recovered, sort_keys=True)
-    ref_canonical = json.dumps(reference, sort_keys=True)
-    
-    rec_hash = hashlib.sha256(rec_canonical.encode()).hexdigest()
-    ref_hash = hashlib.sha256(ref_canonical.encode()).hexdigest()
-    
-    assert rec_hash == ref_hash, "Output hash does not match reference"
+    def test_dependency_ordering(self):
+        """Check that dependencies come before their dependents in the output."""
+        ref = load_reference()
+        output = load_output()
+        # Every package in output should appear after all its resolved deps
+        position = {pkg: i for i, pkg in enumerate(output)}
+        # Load deps from reference to verify ordering
+        expected = ref["install_order"]
+        pos_expected = {pkg: i for i, pkg in enumerate(expected)}
+        for pkg in output:
+            if pkg in pos_expected:
+                assert position[pkg] == pos_expected[pkg], \
+                    f"Package '{pkg}' at wrong position: expected {pos_expected[pkg]}, got {position[pkg]}"

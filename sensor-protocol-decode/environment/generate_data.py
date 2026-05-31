@@ -11,7 +11,7 @@ os.makedirs("/app/data", exist_ok=True)
 
 NUM_FRAMES = 300
 FRAME_SIZE = 64
-XOR_KEY_LEN = 64  # Same as frame size
+XOR_KEY_LEN = 192  # 3 frames
 
 # --- Generate sensor data ---
 sensor_types = ["temp", "pressure", "humidity", "flow", "vibration"]
@@ -40,37 +40,29 @@ for i in range(NUM_FRAMES):
         "value": value
     })
 
-
 # --- Build raw frames ---
-# Frame format (64 bytes, ALL ASCII/null):
+# Frame format (64 bytes):
 # [0-3]   uint32 LE: sequence number (0-299)
 # [4-15]  ASCII null-padded: sensor name (12 bytes)
-# [16-39] ASCII null-padded: timestamp "2024-03-DDThh:mm:ssZ" (24 bytes)
-# [40-51] ASCII null-padded: value as text e.g. "784.0957" (12 bytes)
-# [52-63] zero padding (12 bytes)
-
+# [16-39] ASCII null-padded: timestamp (24 bytes)
+# [40-47] float64 LE: sensor value
+# [48-63] zero padding (16 bytes)
 raw_frames = bytearray()
 for rec in records:
     frame = bytearray(FRAME_SIZE)
-    # Sequence number as uint32 LE
     struct.pack_into('<I', frame, 0, rec["seq"])
-    # Sensor name
     sensor_bytes = rec["sensor"].encode('ascii')
     frame[4:4+len(sensor_bytes)] = sensor_bytes
-    # Timestamp
     ts_bytes = rec["timestamp"].encode('ascii')
     frame[16:16+len(ts_bytes)] = ts_bytes
-    # Value as ASCII text (max 12 chars for "950.0000" format)
-    val_str = f"{rec['value']:.4f}"
-    val_bytes = val_str.encode('ascii')
-    frame[40:40+len(val_bytes)] = val_bytes
+    struct.pack_into('<d', frame, 40, rec["value"])
     raw_frames.extend(frame)
 
 # --- Generate permutation (fixed, random) ---
 perm = list(range(FRAME_SIZE))
 random.shuffle(perm)
 
-# --- Generate XOR key (64 bytes, random, no zero bytes) ---
+# --- Generate XOR key (192 bytes, random, no zero bytes) ---
 xor_key = bytes([random.randint(1, 255) for _ in range(XOR_KEY_LEN)])
 
 # --- Apply corruption: first permute each frame, then XOR ---
@@ -83,7 +75,7 @@ for i in range(NUM_FRAMES):
         permuted_frame[dst] = frame[src]
     permuted.extend(permuted_frame)
 
-# Apply XOR: key repeats every 64 bytes
+# Apply XOR over entire permuted data
 corrupted = bytearray(len(permuted))
 for i in range(len(permuted)):
     corrupted[i] = permuted[i] ^ xor_key[i % XOR_KEY_LEN]

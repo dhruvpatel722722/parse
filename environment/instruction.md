@@ -7,7 +7,7 @@ Each reading was corrupted by two operations applied in sequence:
 2. A repeating byte mask was XORed across the shuffled result.
 
 The original (unscrambled) reading format:
-- **First block**: a calibration header where byte position `i` follows `(reading_index * M[i] + O[i]) mod 256` with known multipliers `M = [23, 1, 41, 7, 31, 11, 3, 37, 29, 13, 19, 17]` and unknown offsets O.
+- **First block**: a calibration header. Each header byte `i` follows `(reading_index * M[i] + O[i]) mod 256` with unknown multipliers M and known offsets `O = [175, 0, 60, 100, 225, 150, 50, 10, 200, 25, 75, 125]`. Each multiplier is a distinct odd number in [1, 255].
 - **Middle blocks**: opaque sensor payload.
 - **Last block**: all zero bytes (null padding).
 

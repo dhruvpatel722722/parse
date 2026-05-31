@@ -9,7 +9,7 @@ echo "Running recovery..."
 cat > /tmp/solve.py << 'PYEOF'
 import hashlib
 
-KNOWN_MULT = [23, 1, 41, 7, 31, 11, 3, 37, 29, 13, 19, 17]
+KNOWN_OFF = [175, 0, 60, 100, 225, 150, 50, 10, 200, 25, 75, 125]
 
 with open('/app/readings.bin', 'rb') as f:
     raw = f.read()
@@ -39,7 +39,6 @@ print(f"Block size: {BS}")
 last_blk = RS - BS
 key = bytes(readings[0][last_blk + k] for k in range(BS))
 
-# Verify key consistency across frames
 for i in range(1, NR):
     if bytes(readings[i][last_blk + k] for k in range(BS)) != key:
         print(f"Key inconsistency at frame {i}!")
@@ -47,40 +46,24 @@ for i in range(1, NR):
 else:
     print(f"Key recovered: {BS} bytes")
 
-# Step 3: Undo XOR on block 0 to get permuted header values
-perm_pts = []
-for i in range(NR):
-    blk0 = bytes(readings[i][k] ^ key[k] for k in range(BS))
-    perm_pts.append(blk0)
+# Step 3: Undo XOR on block 0 of frame 0 to get permuted header offsets
+perm_hdr0 = bytes(readings[0][k] ^ key[k] for k in range(BS))
+# perm_hdr0[k] = OFF[perm[k]] (header at reading_index=0 = just offsets)
 
-# Step 4: Fit linear functions per output position
-M_arr = [0] * BS
-O_arr = [0] * BS
-for k in range(BS):
-    O_k = perm_pts[0][k]
-    M_k = (perm_pts[1][k] - O_k) % 256
-    ok = all(perm_pts[idx][k] == (idx * M_k + O_k) % 256 for idx in range(NR))
-    if not ok:
-        print(f"  Linear fit failed at position {k}")
-    M_arr[k] = M_k
-    O_arr[k] = O_k
-
-print(f"Discovered M values: {M_arr}")
-
-# Step 5: Recover permutation using known MULT array
-# perm[k] = index v in KNOWN_MULT where KNOWN_MULT[v] == M_arr[k]
+# Step 4: Recover permutation by matching to known O array
 perm = [None] * BS
 for k in range(BS):
+    val = perm_hdr0[k]
     for v in range(BS):
-        if KNOWN_MULT[v] == M_arr[k]:
+        if KNOWN_OFF[v] == val and v not in perm:
             perm[k] = v
             break
     if perm[k] is None:
-        print(f"  ERROR: M={M_arr[k]} not found in MULT array")
+        print(f"  ERROR: value {val} not found in O array")
 
 print(f"Permutation: {perm}")
 
-# Step 6: Decrypt all readings
+# Step 5: Decrypt all readings
 def decrypt(enc):
     permuted = bytearray(RS)
     for i in range(RS):

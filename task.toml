@@ -2,7 +2,7 @@ version = "1.0"
 
 [metadata]
 name = "stream-reconstruct"
-description = "Recover sensor readings from a binary stream scrambled by block-level byte shuffle and repeating XOR mask"
+description = "Recover records from a binary stream scrambled by block-level byte shuffle and repeating XOR mask"
 category = "reverse_engineering"
 tags = ["cryptanalysis", "binary", "permutation", "signal-processing"]
 author_name = "dhruvpatel"

@@ -12,6 +12,6 @@ COPY test.sh /app/tests/test.sh
 COPY test_outputs.py /app/tests/test_outputs.py
 RUN chmod +x /app/tests/test.sh
 
-RUN test -f /app/readings.bin && \
+RUN test -f /app/data.bin && \
     test -f /var/lib/tbench/.reference.json && \
     test ! -f /app/generate_data.py

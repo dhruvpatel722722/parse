@@ -1,16 +1,14 @@
-# Sensor Reading Recovery
+# Scrambled Record Recovery
 
-The file `/app/readings.bin` (19200 bytes) contains 200 scrambled sensor readings of 96 bytes each.
+A data file `/app/data.bin` (19200 bytes) contains 200 records of 96 bytes each that were scrambled by a two-layer process:
 
-Each reading was corrupted by two operations applied in sequence:
-1. Within consecutive fixed-size blocks, byte positions were rearranged by a fixed shuffle (the same unknown pattern for every block in every reading).
-2. A repeating byte mask was XORed across the shuffled result.
+1. A fixed byte-position shuffle applied independently to consecutive fixed-size blocks within each record.
+2. A fixed repeating mask XORed across the shuffled result.
 
-The original (unscrambled) reading format:
-- **First block**: a calibration header. Each header byte `i` follows `(reading_index * M[i] + O[i]) mod 256` with unknown multipliers M and known offsets `O = [175, 0, 60, 100, 225, 150, 50, 10, 200, 25, 75, 125]`. Each multiplier is a distinct odd number in [1, 255].
-- **Middle blocks**: opaque sensor payload.
-- **Last block**: all zero bytes (null padding).
+Each original record had:
+- A calibration header occupying the first block, where byte `i` follows `(record_index * M[i] + O[i]) mod 256` with multipliers `M = [23, 1, 41, 7, 31, 11, 3, 37, 29, 13, 19, 17]` and unknown offsets O.
+- 12 null bytes (`0x00`) at the end (occupying the last block).
 
-The block size and mask length are not provided and must be determined from the data.
+Note: the mask repeats with a period that is a multiple of the block size but not necessarily equal to it. Both the block size and the mask period must be determined from the data.
 
-Write all 200 recovered plaintext readings sequentially to `/app/recovered.bin` (19200 bytes).
+Recover all 200 original records in order and write them to `/app/recovered.bin` (19200 bytes).

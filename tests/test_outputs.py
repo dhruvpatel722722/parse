@@ -1,4 +1,4 @@
-"""Verification tests for sensor reading recovery."""
+"""Verification tests for scrambled record recovery."""
 import hashlib, json, os
 
 RS = 96
@@ -26,22 +26,21 @@ def test_full_hash():
     assert h == ref['full_hash']
 
 def test_individual_hashes():
-    """Each reading must match its reference hash."""
+    """Each record must match its reference hash."""
     ref = load_ref()
     with open(RECOVERED, 'rb') as f:
         data = f.read()
     bad = [i for i in range(NR)
-           if hashlib.sha256(data[i*RS:(i+1)*RS]).hexdigest() != ref['reading_hashes'][i]]
-    assert len(bad) == 0, f"{len(bad)} readings wrong"
+           if hashlib.sha256(data[i*RS:(i+1)*RS]).hexdigest() != ref['record_hashes'][i]]
+    assert len(bad) == 0, f"{len(bad)} records wrong"
 
 def test_padding():
-    """Last block of every reading must be zero."""
+    """Last block of every record must be zero."""
     ref = load_ref()
     bs = ref['block_size']
     with open(RECOVERED, 'rb') as f:
         data = f.read()
-    bad = [i for i in range(NR)
-           if data[i*RS+RS-bs:(i+1)*RS] != b'\x00'*bs]
+    bad = [i for i in range(NR) if data[i*RS+RS-bs:(i+1)*RS] != b'\x00'*bs]
     assert len(bad) == 0
 
 def test_header_linearity():

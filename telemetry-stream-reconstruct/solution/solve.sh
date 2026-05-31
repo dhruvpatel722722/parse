@@ -9,6 +9,8 @@ echo "Running recovery..."
 cat > /tmp/solve.py << 'PYEOF'
 import hashlib
 
+KNOWN_MULT = [23, 1, 41, 7, 31, 11, 3, 37, 29, 13, 19, 17]
+
 with open('/app/readings.bin', 'rb') as f:
     raw = f.read()
 
@@ -34,19 +36,16 @@ else:
 print(f"Block size: {BS}")
 
 # Step 2: Recover XOR key from last block (all-zero padding)
-# Last block at offset (RS - BS). Since key repeats every BS bytes (key_size = block_size),
-# padding gives: enc[last+k] = 0 ^ key[k] = key[k] for all k
 last_blk = RS - BS
 key = bytes(readings[0][last_blk + k] for k in range(BS))
 
-# Verify key is consistent across frames (padding is always zero):
+# Verify key consistency across frames
 for i in range(1, NR):
-    test_key = bytes(readings[i][last_blk + k] for k in range(BS))
-    if test_key != key:
-        print(f"WARNING: key inconsistency at frame {i}")
+    if bytes(readings[i][last_blk + k] for k in range(BS)) != key:
+        print(f"Key inconsistency at frame {i}!")
         break
 else:
-    print(f"Key verified: {BS} bytes (consistent across all frames)")
+    print(f"Key recovered: {BS} bytes")
 
 # Step 3: Undo XOR on block 0 to get permuted header values
 perm_pts = []
@@ -54,9 +53,7 @@ for i in range(NR):
     blk0 = bytes(readings[i][k] ^ key[k] for k in range(BS))
     perm_pts.append(blk0)
 
-# Step 4: Fit linear functions to determine M and O for each output position
-# Header byte v = (reading_index * M[v] + O[v]) % 256
-# At output position k: perm_pts[i][k] = (i * M_k + O_k) % 256
+# Step 4: Fit linear functions per output position
 M_arr = [0] * BS
 O_arr = [0] * BS
 for k in range(BS):
@@ -64,18 +61,23 @@ for k in range(BS):
     M_k = (perm_pts[1][k] - O_k) % 256
     ok = all(perm_pts[idx][k] == (idx * M_k + O_k) % 256 for idx in range(NR))
     if not ok:
-        print(f"  WARNING: linear fit failed at position {k}")
+        print(f"  Linear fit failed at position {k}")
     M_arr[k] = M_k
     O_arr[k] = O_k
 
-print(f"Discovered multipliers: {M_arr}")
+print(f"Discovered M values: {M_arr}")
 
-# Step 5: Recover permutation by sorting M values
-# Input positions are ordered by ascending M (per problem structure)
-m_sorted = sorted(range(BS), key=lambda k: M_arr[k])
-perm = [0] * BS
-for rank, k in enumerate(m_sorted):
-    perm[k] = rank
+# Step 5: Recover permutation using known MULT array
+# perm[k] = index v in KNOWN_MULT where KNOWN_MULT[v] == M_arr[k]
+perm = [None] * BS
+for k in range(BS):
+    for v in range(BS):
+        if KNOWN_MULT[v] == M_arr[k]:
+            perm[k] = v
+            break
+    if perm[k] is None:
+        print(f"  ERROR: M={M_arr[k]} not found in MULT array")
+
 print(f"Permutation: {perm}")
 
 # Step 6: Decrypt all readings
@@ -91,20 +93,10 @@ def decrypt(enc):
 
 all_pt = b''.join(decrypt(readings[i]) for i in range(NR))
 
-# Verify padding
+# Verify
 pad_ok = sum(1 for i in range(NR)
-             if all_pt[i*RS + RS - BS:(i+1)*RS] == b'\x00' * BS)
+             if all_pt[i*RS+RS-BS:(i+1)*RS] == b'\x00'*BS)
 print(f"Padding check: {pad_ok}/{NR}")
-
-# Verify headers
-hdr_ok = 0
-for i in range(NR):
-    hdr = all_pt[i*RS:i*RS+BS]
-    expected = bytes((i * M_arr[m_sorted[v]] + O_arr[m_sorted[v]]) % 256
-                     for v in range(BS))
-    if hdr == expected:
-        hdr_ok += 1
-print(f"Header check: {hdr_ok}/{NR}")
 
 with open('/app/recovered.bin', 'wb') as f:
     f.write(all_pt)

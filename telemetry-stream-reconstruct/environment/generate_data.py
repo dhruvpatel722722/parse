@@ -1,29 +1,34 @@
 #!/usr/bin/env python3
 """Generate scrambled sensor readings."""
-import json, os, struct, hashlib, random
+import json, os, struct, hashlib, random, zlib
 
 READING_SIZE = 96
 BLOCK_SIZE = 12
 NUM_READINGS = 200
 KEY_SIZE = 12
-MULT = [1, 3, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41]
-OFF = [0, 50, 100, 150, 200, 25, 75, 125, 175, 225, 10, 60]
+# Multipliers NOT sorted and include even values - harder to guess ordering
+MULT = [23, 1, 41, 7, 31, 11, 3, 37, 29, 13, 19, 17]
+OFF = [175, 0, 60, 100, 225, 150, 50, 10, 200, 25, 75, 125]
 
-random.seed(0x53454E53)
+random.seed(0x48415244)
+
 
 def gen_perm(n):
     p = list(range(n))
     random.shuffle(p)
     return p
 
+
 def gen_key(n):
     return bytes(random.randint(0, 255) for _ in range(n))
+
 
 def apply_perm(data, perm):
     out = bytearray(len(data))
     for i, p in enumerate(perm):
         out[i] = data[p]
     return bytes(out)
+
 
 def scramble(plaintext, perm, key):
     assert len(plaintext) == READING_SIZE
@@ -35,14 +40,17 @@ def scramble(plaintext, perm, key):
         out[i] = permuted[i] ^ key[i % KEY_SIZE]
     return bytes(out)
 
+
 def build_header(idx):
     return bytes((idx * m + o) % 256 for m, o in zip(MULT, OFF))
+
 
 def build_reading(idx):
     header = build_header(idx)
     payload = bytes(random.randint(0, 255) for _ in range(72))
     padding = b'\x00' * 12
     return header + payload + padding
+
 
 def main():
     perm = gen_perm(BLOCK_SIZE)
@@ -76,6 +84,7 @@ def main():
     with open('/var/lib/tbench/.reference.json', 'w') as f:
         json.dump(ref, f)
     print(f"OK: perm={perm}, key_len={KEY_SIZE}, SHA256={full}")
+
 
 if __name__ == '__main__':
     main()

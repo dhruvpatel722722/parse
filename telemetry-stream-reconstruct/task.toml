@@ -1,0 +1,11 @@
+[task]
+name = "telemetry-stream-reconstruct"
+description = "Recover plaintext from a satellite telemetry stream obfuscated by block permutation and XOR masking"
+categories = ["reverse_engineering", "cryptanalysis"]
+difficulty = "hard"
+author_name = "dhruvpatel"
+allow_internet = true
+timeout = 1800
+
+[task.evaluation]
+test_command = "bash /app/tests/test.sh"

@@ -5,7 +5,7 @@
 mkdir -p /logs/verifier
 
 # Run the Python test suite
-python3 /app/tests/test_outputs.py
+pytest /app/tests/test_outputs.py -v
 exit_code=$?
 
 if [ $exit_code -eq 0 ]; then

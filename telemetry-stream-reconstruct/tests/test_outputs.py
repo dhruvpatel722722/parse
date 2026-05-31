@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Verification tests for telemetry stream recovery.
 Validates the recovered plaintext against reference hashes.
@@ -7,8 +6,6 @@ Validates the recovered plaintext against reference hashes.
 import hashlib
 import json
 import os
-import sys
-
 
 FRAME_SIZE = 64
 NUM_FRAMES = 300
@@ -96,38 +93,3 @@ def test_header_consistency():
     assert len(failures) == 0, (
         f"{len(failures)} frames have incorrect headers"
     )
-
-
-def run_tests():
-    """Run all test functions and report results."""
-    tests = [
-        test_output_file_exists,
-        test_output_file_size,
-        test_full_plaintext_hash,
-        test_individual_frame_hashes,
-        test_zero_padding_intact,
-        test_header_consistency,
-    ]
-
-    passed = 0
-    failed = 0
-
-    for test_fn in tests:
-        name = test_fn.__name__
-        try:
-            test_fn()
-            print(f"  PASS: {name}")
-            passed += 1
-        except AssertionError as e:
-            print(f"  FAIL: {name} - {e}")
-            failed += 1
-        except Exception as e:
-            print(f"  ERROR: {name} - {type(e).__name__}: {e}")
-            failed += 1
-
-    print(f"\nResults: {passed}/{passed+failed} tests passed")
-    return 0 if failed == 0 else 1
-
-
-if __name__ == '__main__':
-    sys.exit(run_tests())

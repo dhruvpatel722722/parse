@@ -2,6 +2,9 @@ FROM ghcr.io/laude-institute/t-bench/python-3-13:20250620
 
 WORKDIR /app
 
+# Install pytest
+RUN pip install pytest==8.3.4
+
 # Copy and run data generator, then delete it
 COPY environment/generate_data.py /app/generate_data.py
 RUN python /app/generate_data.py && rm -f /app/generate_data.py

@@ -1,35 +1,29 @@
 # Broken Package Resolver
 
-A package manager's resolver daemon crashed mid-operation, leaving behind its internal database files. Your job is to reconstruct the correct installation order that the resolver would have produced.
+A package manager's resolver crashed, leaving its database files. Reconstruct the correct installation order.
 
 ## Data Files
 
-The data is located in `/app/data/` and consists of:
+Located in `/app/data/`:
 
-1. **`packages.db`** — Binary package database containing package names, versions, priority tiers, and virtual provides declarations.
-   - Format: 4-byte magic `PKDB`, 4-byte LE package count, then per package:
-     - 2-byte LE name length, name bytes
-     - 2-byte LE version length, version string
-     - 1-byte tier (priority level)
-     - 4-byte LE installed size
-     - 2-byte LE provides count, then per provide: 2-byte LE length, provide name
+1. **`packages.db`** — Binary database: 4-byte magic `PKDB`, 4-byte LE count, then per package:
+   - 2-byte LE name length, name, 2-byte LE version length, version, 1-byte tier, 4-byte LE size
+   - 2-byte LE provides count, then per provide: 2-byte LE length, name
 
-2. **`dependencies.txt`** — Human-readable dependency declarations in format:
-   `package: dep1 (>= version), dep2 (>= version), ...`
+2. **`dependencies.txt`** — Format: `package: dep1 (>= version), dep2 (>= version), ...`
 
-3. **`conflicts.conf`** — Mutual exclusion declarations. Packages on the same line cannot coexist.
+3. **`conflicts.conf`** — Mutual exclusions: `pkg1 <-> pkg2`
 
-4. **`resolver.conf`** — Documentation of the resolution algorithm.
+4. **`resolver.conf`** — Full algorithm documentation.
 
 ## Task
 
-Implement the package resolution algorithm described in `resolver.conf` and produce the correct installation order.
+Implement the resolution algorithm from `resolver.conf`. Write output to `/app/output/install_order.txt` — one package name per line, in exact install order. Only include successfully installed packages.
 
-Write the output to `/app/output/install_order.txt` — one package name per line, in the exact order they would be installed. Only include packages that are successfully installed (not skipped due to conflicts, and not deadlocked due to unsatisfiable dependencies).
+## Key Rules
 
-## Important Notes
-
-- Versions use **epoch-based comparison**: format is `[epoch:]major.minor.patch`. If no epoch prefix, epoch is 0. Epochs dominate: `2:0.1.0` is newer than `1:99.99.99`.
-- Virtual packages (e.g., `virtual-runtime`) are satisfied by any installed package that declares it in its `provides` list.
-- The resolver processes packages iteratively — one package per step — and order matters because conflicts are resolved on a first-installed-wins basis.
-- Some packages may have unsatisfiable dependencies and will never be installed.
+- **Epoch versioning**: format `[epoch:]major.minor.patch`. No epoch means epoch 0. Epochs dominate: `2:0.1.0` > `1:99.99.99`.
+- **Virtual provides**: dependency on `virtual-X` satisfied if any installed package declares it in provides. Version not checked for virtuals.
+- **Iterative resolution**: one package per step. Priority: lowest tier → highest version (epoch-aware) → alphabetical name.
+- **Conflicts**: first-installed-wins; conflicting packages permanently skipped.
+- **Deadlocks**: packages with unsatisfiable deps are never installed.

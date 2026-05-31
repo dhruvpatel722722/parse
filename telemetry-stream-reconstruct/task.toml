@@ -6,6 +6,7 @@ description = "Recover plaintext from a satellite telemetry stream obfuscated by
 category = "reverse_engineering"
 tags = ["cryptanalysis", "xor", "permutation", "known-plaintext"]
 author_name = "dhruvpatel"
+difficulty = "hard"
 expert_time_estimate_min = 30
 junior_time_estimate_min = 90
 

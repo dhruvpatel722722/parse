@@ -6,7 +6,6 @@ READING_SIZE = 96
 BLOCK_SIZE = 12
 NUM_READINGS = 200
 KEY_SIZE = 12
-# Multipliers NOT sorted and include even values - harder to guess ordering
 MULT = [23, 1, 41, 7, 31, 11, 3, 37, 29, 13, 19, 17]
 OFF = [175, 0, 60, 100, 225, 150, 50, 10, 200, 25, 75, 125]
 

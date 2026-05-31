@@ -4,10 +4,10 @@ version = "1.0"
 author_name = "dhruvpatel"
 author_email = "dhruvpatel722722@github.com"
 difficulty = "hard"
-category = "systems"
-tags = [ "coding", "dependency-resolution", "binary-parsing", "graph-algorithms" ]
-expert_time_estimate_min = 45
-junior_time_estimate_min = 240
+category = "reverse-engineering"
+tags = [ "coding", "binary-parsing", "cryptanalysis", "state-tracking" ]
+expert_time_estimate_min = 60
+junior_time_estimate_min = 300
 
 [verifier]
 timeout_sec = 1800.0

@@ -1,358 +1,171 @@
 #!/usr/bin/env python3
 """
-Generate a corrupted package manager database for the broken-package-resolver task.
+Generate data for the state-machine-recovery task.
 
-The database has 50 packages with:
-- Version-conditional dependencies (A depends on B >= version)
-- Mutual exclusion / conflict constraints
-- Virtual provides (A provides virtual-X, satisfying deps on X)
-- Epoch-based versioning (epoch:version, epoch takes priority)
-- Priority tiers that affect resolution order
-- A specific deterministic resolution algorithm
+The task encodes 64-channel state machine transitions in a custom binary protocol
+with multiple difficulty layers:
 
-The agent must produce the correct install order by implementing the resolution algorithm.
+1. HEADER: 8 bytes - magic "SMLG" + 2-byte BE record count + 1-byte channel count + 1-byte flags
+2. BODY: Records packed at 19 bits each in a continuous bitstream
+   - 6 bits: channel ID (0-63)
+   - 5 bits: signed delta (2's complement, -16..+15) 
+   - 8 bits: CRC-8 checksum (non-standard polynomial 0xD5)
+3. COMPLICATION: Every 19-bit record is XOR'd with a 19-bit rolling key
+   derived from the previous record's raw bits (before XOR).
+   First record uses initial key = 0x4A3E7 (19 bits).
+4. SYNC MARKERS: 19 bits of pattern 0x55555 (alternating 10101...) every 50 records
+   These are NOT XOR'd and are NOT records.
+5. ~15% of records have corrupted CRC (after XOR layer is applied)
+
+The agent receives:
+- The binary file
+- A README that describes the basic format but NOT:
+  - The CRC polynomial
+  - The XOR rolling key mechanism  
+  - The initial key value
+  
+The agent must:
+1. Parse the bitstream
+2. Detect and handle sync markers
+3. Discover the XOR key mechanism by analyzing patterns
+4. Determine the CRC polynomial (by brute-forcing with unscrambled data)
+5. Track state for 64 channels
+6. Output final states
 """
 
 import json
 import os
 import random
 import struct
-import hashlib
 
-random.seed(98765)
+random.seed(54321)
 
-# ============================================================================
-# PACKAGE DEFINITIONS
-# ============================================================================
+NUM_CHANNELS = 64
+NUM_RECORDS = 400
+CORRUPT_RATE = 0.15
+SYNC_INTERVAL = 50
+CRC_POLY = 0xD5  # Non-standard: x^8 + x^7 + x^6 + x^4 + x^2 + 1
+INITIAL_XOR_KEY = 0x4A3E7  # 19-bit initial rolling XOR key
+RECORD_BITS = 19
+SYNC_PATTERN = 0x55555  # 19 bits: 01010101010101010101 (alternating)
 
-# Package names - mix of realistic and slightly confusing names
-PKG_NAMES = [
-    "libcore", "libnet", "libcrypto", "libfs", "libui",
-    "libmath", "liblog", "libthread", "libmem", "libio",
-    "sysbase", "sysnet", "sysproc", "sysauth", "syskern",
-    "appserver", "appweb", "appcli", "appgui", "appdb",
-    "drvnet", "drvfs", "drvgpu", "drvaudio", "drvusb",
-    "utilzip", "utiltar", "utilhash", "utilenc", "utilfmt",
-    "fwcore", "fwnet", "fwauth", "fwlog", "fwcache",
-    "plughttp", "plugftp", "plugssh", "plugdns", "plugsmtp",
-    "extjson", "extxml", "extcsv", "extyaml", "exttoml",
-    "modstats", "modgraph", "modml", "modviz", "modsched"
-]
 
-# Epoch-based versions: "epoch:major.minor.patch" or just "major.minor.patch" (epoch=0)
-# The trick: epoch comparison takes absolute priority over version numbers
-# So "2:0.1.0" > "1:99.99.99" > "0:99.99.99" > "5.0.0" (no epoch = epoch 0)
-def make_version(epoch=0, major=1, minor=0, patch=0):
-    if epoch > 0:
-        return f"{epoch}:{major}.{minor}.{patch}"
-    return f"{major}.{minor}.{patch}"
+def crc8(data_bits, poly=CRC_POLY):
+    """CRC-8 over a list of bits. No init, no final XOR."""
+    crc = 0x00
+    for bit in data_bits:
+        crc ^= (bit << 7)
+        if crc & 0x80:
+            crc = ((crc << 1) ^ poly) & 0xFF
+        else:
+            crc = (crc << 1) & 0xFF
+    return crc
 
-def parse_version(v):
-    """Parse version string into (epoch, major, minor, patch) tuple."""
-    if ':' in v:
-        epoch_str, rest = v.split(':', 1)
-        epoch = int(epoch_str)
-    else:
-        epoch = 0
-        rest = v
-    parts = rest.split('.')
-    major = int(parts[0]) if len(parts) > 0 else 0
-    minor = int(parts[1]) if len(parts) > 1 else 0
-    patch = int(parts[2]) if len(parts) > 2 else 0
-    return (epoch, major, minor, patch)
 
-def version_compare(v1, v2):
-    """Compare two version strings. Returns -1, 0, or 1."""
-    t1 = parse_version(v1)
-    t2 = parse_version(v2)
-    if t1 < t2: return -1
-    if t1 > t2: return 1
-    return 0
+def int_to_bits(value, num_bits):
+    """Convert integer to list of bits (MSB first)."""
+    return [(value >> (num_bits - 1 - i)) & 1 for i in range(num_bits)]
 
-def version_satisfies(installed_ver, constraint_op, constraint_ver):
-    """Check if installed_ver satisfies the constraint."""
-    cmp = version_compare(installed_ver, constraint_ver)
-    if constraint_op == ">=": return cmp >= 0
-    if constraint_op == "<=": return cmp <= 0
-    if constraint_op == ">": return cmp > 0
-    if constraint_op == "<": return cmp < 0
-    if constraint_op == "==": return cmp == 0
-    if constraint_op == "!=": return cmp != 0
-    return False
 
-# ============================================================================
-# BUILD PACKAGE DATABASE
-# ============================================================================
+def bits_to_int(bits):
+    """Convert list of bits (MSB first) to integer."""
+    val = 0
+    for b in bits:
+        val = (val << 1) | b
+    return val
 
-packages = {}
-for i, name in enumerate(PKG_NAMES):
-    # Assign versions - some with epochs to create traps
-    if i % 7 == 0:
-        # Epoch 2 packages - look "old" version-wise but epoch makes them "new"
-        ver = make_version(epoch=2, major=0, minor=random.randint(1,5), patch=random.randint(0,9))
-    elif i % 11 == 0:
-        # Epoch 1 packages
-        ver = make_version(epoch=1, major=random.randint(1,3), minor=random.randint(0,9), patch=random.randint(0,9))
-    else:
-        # Normal packages
-        ver = make_version(epoch=0, major=random.randint(1,8), minor=random.randint(0,15), patch=random.randint(0,20))
 
-    # Priority tiers: 1 (critical/install first) to 5 (optional/install last)
-    # Within same tier, alphabetical by name
-    tier = (i % 5) + 1
+def bits_to_bytes(bits):
+    """Convert bit list to bytes, zero-padding final byte."""
+    while len(bits) % 8 != 0:
+        bits.append(0)
+    result = bytearray()
+    for i in range(0, len(bits), 8):
+        byte = 0
+        for j in range(8):
+            byte = (byte << 1) | bits[i + j]
+        result.append(byte)
+    return bytes(result)
 
-    packages[name] = {
-        "version": ver,
-        "tier": tier,
-        "depends": [],      # [(pkg_name, op, version_constraint)]
-        "conflicts": [],    # [pkg_name]
-        "provides": [],     # [virtual_name]
-        "installed_size": random.randint(100, 50000),
-    }
+
+def encode_delta_5bit(delta):
+    """Encode signed delta (-16..+15) as 5-bit 2's complement."""
+    if delta < 0:
+        return (1 << 5) + delta
+    return delta
+
+
+def xor_bits(bits_a, bits_b):
+    """XOR two bit lists of same length."""
+    return [a ^ b for a, b in zip(bits_a, bits_b)]
+
 
 # ============================================================================
-# VIRTUAL PROVIDES - packages that satisfy dependencies under alternate names
+# GENERATE RECORDS
 # ============================================================================
 
-# These create indirection that LLMs struggle with
-virtual_provides = {
-    "libcore": ["virtual-runtime"],
-    "sysbase": ["virtual-runtime", "virtual-init"],
-    "syskern": ["virtual-init"],
-    "libcrypto": ["virtual-security"],
-    "fwauth": ["virtual-security"],
-    "libnet": ["virtual-network"],
-    "sysnet": ["virtual-network"],
-    "drvnet": ["virtual-network"],
-    "libui": ["virtual-display"],
-    "drvgpu": ["virtual-display"],
-    "appgui": ["virtual-display"],
-}
+channel_states = [0] * NUM_CHANNELS
+records = []  # (channel, delta, is_corrupt)
 
-for pkg, virtuals in virtual_provides.items():
-    packages[pkg]["provides"] = virtuals
+for i in range(NUM_RECORDS):
+    channel = random.randint(0, NUM_CHANNELS - 1)
+    delta = random.randint(-16, 15)
+    is_corrupt = random.random() < CORRUPT_RATE
+    records.append((channel, delta, is_corrupt))
+    if not is_corrupt:
+        channel_states[channel] = (channel_states[channel] + delta) % 256
 
 # ============================================================================
-# DEPENDENCIES - version-conditional with epochs to confuse
+# ENCODE INTO BITSTREAM WITH XOR LAYER
 # ============================================================================
 
-# Layer 1: Core libs have no deps (tier 1)
-# Layer 2: Sys packages depend on libs
-# Layer 3: Drivers depend on sys + libs
-# Layer 4: Frameworks depend on drivers + sys
-# Layer 5: Apps/plugins/ext/mod depend on frameworks + libs
+bitstream = []
 
-dependencies = [
-    # Sys depends on libs
-    ("sysbase", "libcore", ">=", "1:0.0.0"),  # Trap: requires epoch >= 1, libcore has epoch 2 so OK
-    ("sysnet", "libnet", ">=", "2.0.0"),
-    ("sysnet", "virtual-runtime", ">=", "0.0.1"),  # Virtual dep!
-    ("sysproc", "libthread", ">=", "1.0.0"),
-    ("sysproc", "libmem", ">=", "1.0.0"),
-    ("sysauth", "libcrypto", ">=", "1:0.0.0"),  # Requires epoch 1+, libcrypto has epoch 0 BUT fwauth provides virtual-security
-    ("sysauth", "virtual-security", ">=", "0.0.1"),
-    ("syskern", "libcore", ">=", "2:0.0.0"),  # Requires epoch 2, libcore has epoch 2 - OK
-    ("syskern", "libmem", ">=", "1.0.0"),
+# Header: "SMLG" + 2-byte BE record count + 1-byte channel count + 1-byte flags
+header = b"SMLG" + struct.pack(">H", NUM_RECORDS) + bytes([NUM_CHANNELS, 0x00])
+for byte in header:
+    bitstream.extend(int_to_bits(byte, 8))
 
-    # Drivers depend on sys + libs
-    ("drvnet", "sysnet", ">=", "1.0.0"),
-    ("drvnet", "libio", ">=", "1.0.0"),
-    ("drvfs", "sysproc", ">=", "1.0.0"),
-    ("drvfs", "libfs", ">=", "1.0.0"),
-    ("drvgpu", "syskern", ">=", "1.0.0"),
-    ("drvgpu", "libmem", ">=", "2.0.0"),
-    ("drvaudio", "syskern", ">=", "1.0.0"),
-    ("drvaudio", "libio", ">=", "1.0.0"),
-    ("drvusb", "syskern", ">=", "1.0.0"),
-    ("drvusb", "libio", ">=", "1.0.0"),
+# Encode records with XOR rolling key and sync markers
+rolling_key = INITIAL_XOR_KEY  # 19-bit key
 
-    # Frameworks depend on drivers + sys
-    ("fwcore", "sysbase", ">=", "1.0.0"),
-    ("fwcore", "virtual-runtime", ">=", "0.0.1"),
-    ("fwnet", "drvnet", ">=", "1.0.0"),
-    ("fwnet", "fwcore", ">=", "1.0.0"),
-    ("fwauth", "sysauth", ">=", "1.0.0"),
-    ("fwauth", "libcrypto", ">=", "0.1.0"),  # Note: no epoch requirement here
-    ("fwlog", "fwcore", ">=", "1.0.0"),
-    ("fwlog", "liblog", ">=", "1.0.0"),
-    ("fwcache", "fwcore", ">=", "1.0.0"),
-    ("fwcache", "libmem", ">=", "2.0.0"),
+for i, (channel, delta, is_corrupt) in enumerate(records):
+    # Insert sync marker every SYNC_INTERVAL records
+    if i > 0 and i % SYNC_INTERVAL == 0:
+        sync_bits = int_to_bits(SYNC_PATTERN, RECORD_BITS)
+        bitstream.extend(sync_bits)
+        # Sync markers do NOT affect the rolling key
 
-    # Utils depend on libs only
-    ("utilzip", "libio", ">=", "1.0.0"),
-    ("utiltar", "libio", ">=", "1.0.0"),
-    ("utiltar", "libfs", ">=", "1.0.0"),
-    ("utilhash", "libcrypto", ">=", "0.1.0"),
-    ("utilenc", "libcrypto", ">=", "0.1.0"),
-    ("utilenc", "virtual-security", ">=", "0.0.1"),
-    ("utilfmt", "libio", ">=", "1.0.0"),
+    # Build raw record: 6-bit channel + 5-bit delta + 8-bit CRC
+    channel_bits = int_to_bits(channel, 6)
+    delta_encoded = encode_delta_5bit(delta)
+    delta_bits = int_to_bits(delta_encoded, 5)
+    data_bits = channel_bits + delta_bits  # 11 bits for CRC input
+    crc_value = crc8(data_bits)
 
-    # Plugins depend on frameworks
-    ("plughttp", "fwnet", ">=", "1.0.0"),
-    ("plughttp", "fwcore", ">=", "1.0.0"),
-    ("plugftp", "fwnet", ">=", "1.0.0"),
-    ("plugssh", "fwnet", ">=", "1.0.0"),
-    ("plugssh", "fwauth", ">=", "1.0.0"),
-    ("plugdns", "fwnet", ">=", "1.0.0"),
-    ("plugsmtp", "fwnet", ">=", "1.0.0"),
-    ("plugsmtp", "plugdns", ">=", "1.0.0"),
+    if is_corrupt:
+        # Ensure at least one bit flip survives (avoid self-cancellation)
+        original_crc = crc_value
+        while crc_value == original_crc:
+            crc_value = original_crc
+            num_flips = random.randint(1, 3)
+            for _ in range(num_flips):
+                flip_bit = random.randint(0, 7)
+                crc_value ^= (1 << flip_bit)
 
-    # Extensions depend on utils + libs
-    ("extjson", "libio", ">=", "1.0.0"),
-    ("extxml", "libio", ">=", "1.0.0"),
-    ("extxml", "libmem", ">=", "1.5.0"),
-    ("extcsv", "libio", ">=", "1.0.0"),
-    ("extyaml", "extjson", ">=", "1.0.0"),
-    ("exttoml", "extjson", ">=", "1.0.0"),
-    ("exttoml", "utilfmt", ">=", "1.0.0"),
+    crc_bits = int_to_bits(crc_value, 8)
+    raw_record_bits = channel_bits + delta_bits + crc_bits  # 19 bits
 
-    # Apps depend on everything above
-    ("appserver", "fwcore", ">=", "1.0.0"),
-    ("appserver", "fwnet", ">=", "1.0.0"),
-    ("appserver", "fwlog", ">=", "1.0.0"),
-    ("appserver", "plughttp", ">=", "1.0.0"),
-    ("appweb", "appserver", ">=", "1.0.0"),
-    ("appweb", "extjson", ">=", "1.0.0"),
-    ("appweb", "extxml", ">=", "1.0.0"),
-    ("appcli", "fwcore", ">=", "1.0.0"),
-    ("appcli", "utilfmt", ">=", "1.0.0"),
-    ("appgui", "drvgpu", ">=", "1.0.0"),
-    ("appgui", "libui", ">=", "1.0.0"),
-    ("appgui", "fwcore", ">=", "1.0.0"),
-    ("appdb", "fwcache", ">=", "1.0.0"),
-    ("appdb", "fwlog", ">=", "1.0.0"),
-    ("appdb", "extjson", ">=", "1.0.0"),
+    # XOR with rolling key
+    key_bits = int_to_bits(rolling_key, RECORD_BITS)
+    scrambled_bits = xor_bits(raw_record_bits, key_bits)
 
-    # Modules depend on apps/plugins
-    ("modstats", "appdb", ">=", "1.0.0"),
-    ("modstats", "extcsv", ">=", "1.0.0"),
-    ("modgraph", "modstats", ">=", "1.0.0"),
-    ("modgraph", "virtual-display", ">=", "0.0.1"),
-    ("modml", "modstats", ">=", "1.0.0"),
-    ("modml", "libmath", ">=", "1.0.0"),
-    ("modviz", "modgraph", ">=", "1.0.0"),
-    ("modviz", "appgui", ">=", "1.0.0"),
-    ("modsched", "appserver", ">=", "1.0.0"),
-    ("modsched", "libthread", ">=", "1.0.0"),
-]
+    # Update rolling key: rotate raw record left by 7, then XOR with constant
+    raw_int = bits_to_int(raw_record_bits)
+    rolling_key = ((raw_int << 7) | (raw_int >> 12)) & ((1 << RECORD_BITS) - 1)
+    rolling_key ^= 0x35A1F  # Mix with constant to prevent trivial shifts
 
-for pkg, dep, op, ver in dependencies:
-    packages[pkg]["depends"].append((dep, op, ver))
-
-# ============================================================================
-# CONFLICTS - mutual exclusions
-# ============================================================================
-
-conflicts = [
-    ("plugftp", "plugsmtp"),     # Can't have both (port conflict)
-    ("extxml", "extyaml"),       # Parser conflict
-    ("drvaudio", "modviz"),      # Resource conflict (DMA channel)
-]
-
-for pkg1, pkg2 in conflicts:
-    packages[pkg1]["conflicts"].append(pkg2)
-    packages[pkg2]["conflicts"].append(pkg1)
-
-# ============================================================================
-# RESOLUTION ALGORITHM
-# ============================================================================
-# The algorithm works as follows:
-# 1. Start with all packages in the "pending" set
-# 2. Compute "installable" set: packages whose deps are ALL satisfied by
-#    already-installed packages (or virtual provides of installed packages)
-#    AND no conflicts with already-installed packages
-# 3. Among installable packages, pick the one with:
-#    a. LOWEST tier number (highest priority)
-#    b. If tie: HIGHEST version (using epoch comparison)
-#    c. If still tie: ALPHABETICALLY FIRST name
-# 4. Install it (add to installed set)
-# 5. Repeat until all packages installed or deadlock
-#
-# CRITICAL: Some packages will be EXCLUDED because of conflicts.
-# If a package conflicts with an already-installed package, it is SKIPPED permanently.
-# The final answer is the ordered list of successfully installed packages.
-
-def resolve_packages(packages):
-    """Run the resolution algorithm and return the install order."""
-    installed = []  # ordered list of installed package names
-    installed_set = set()
-    pending = set(packages.keys())
-    skipped = set()
-
-    # Build virtual provides lookup
-    virtual_map = {}  # virtual_name -> set of packages that provide it
-    for pkg, info in packages.items():
-        for virt in info["provides"]:
-            if virt not in virtual_map:
-                virtual_map[virt] = set()
-            virtual_map[virt].add(pkg)
-
-    while pending:
-        installable = []
-        for pkg in sorted(pending):
-            if pkg in skipped:
-                continue
-            info = packages[pkg]
-
-            # Check conflicts with already installed
-            has_conflict = False
-            for conflict in info["conflicts"]:
-                if conflict in installed_set:
-                    has_conflict = True
-                    break
-            if has_conflict:
-                skipped.add(pkg)
-                continue
-
-            # Check all dependencies satisfied
-            deps_satisfied = True
-            for dep_name, dep_op, dep_ver in info["depends"]:
-                # Check if dep_name is directly installed
-                if dep_name in installed_set:
-                    # Check version constraint
-                    if not version_satisfies(packages[dep_name]["version"], dep_op, dep_ver):
-                        deps_satisfied = False
-                        break
-                # Check if dep_name is a virtual provide satisfied by installed pkg
-                elif dep_name in virtual_map:
-                    found = False
-                    for provider in virtual_map[dep_name]:
-                        if provider in installed_set:
-                            # Virtual provides always satisfy version constraints
-                            found = True
-                            break
-                    if not found:
-                        deps_satisfied = False
-                        break
-                else:
-                    deps_satisfied = False
-                    break
-
-            if deps_satisfied:
-                installable.append(pkg)
-
-        if not installable:
-            break  # Deadlock or done
-
-        # Sort: lowest tier, then highest version, then alphabetical
-        def sort_key(pkg):
-            info = packages[pkg]
-            ver_tuple = parse_version(info["version"])
-            # Negate version for descending sort
-            neg_ver = tuple(-x for x in ver_tuple)
-            return (info["tier"], neg_ver, pkg)
-
-        installable.sort(key=sort_key)
-        chosen = installable[0]
-
-        installed.append(chosen)
-        installed_set.add(chosen)
-        pending.remove(chosen)
-
-    return installed, list(skipped)
-
-# Run the resolution
-install_order, skipped_pkgs = resolve_packages(packages)
+    bitstream.extend(scrambled_bits)
 
 # ============================================================================
 # WRITE DATA FILES
@@ -360,112 +173,69 @@ install_order, skipped_pkgs = resolve_packages(packages)
 
 os.makedirs("/app/data", exist_ok=True)
 
-# File 1: packages.db - Binary format with package metadata
-# Format: 4-byte magic "PKDB", 4-byte count, then for each package:
-#   2-byte name_len, name, 2-byte version_len, version, 1-byte tier, 4-byte installed_size
-#   2-byte num_provides, [2-byte len, provide_name]*
-with open("/app/data/packages.db", "wb") as f:
-    f.write(b"PKDB")
-    f.write(struct.pack("<I", len(packages)))
-    for name in sorted(packages.keys()):
-        info = packages[name]
-        name_bytes = name.encode()
-        ver_bytes = info["version"].encode()
-        f.write(struct.pack("<H", len(name_bytes)))
-        f.write(name_bytes)
-        f.write(struct.pack("<H", len(ver_bytes)))
-        f.write(ver_bytes)
-        f.write(struct.pack("<B", info["tier"]))
-        f.write(struct.pack("<I", info["installed_size"]))
-        f.write(struct.pack("<H", len(info["provides"])))
-        for prov in info["provides"]:
-            prov_bytes = prov.encode()
-            f.write(struct.pack("<H", len(prov_bytes)))
-            f.write(prov_bytes)
+raw_bytes = bits_to_bytes(bitstream)
+with open("/app/data/telemetry.bin", "wb") as f:
+    f.write(raw_bytes)
 
-# File 2: dependencies.txt - Human-readable but with tricky formatting
-# Format: "pkg_name: dep_name (op version), dep_name (op version), ..."
-# But some lines have trailing comments that change meaning!
-with open("/app/data/dependencies.txt", "w") as f:
-    f.write("# Package Dependency Database v3.2.1\n")
-    f.write("# Format: package: dependency (operator version), ...\n")
-    f.write("# Note: virtual packages are resolved through provides declarations\n")
-    f.write("#\n")
-    for name in sorted(packages.keys()):
-        info = packages[name]
-        if info["depends"]:
-            deps_str = ", ".join(f"{d} ({op} {v})" for d, op, v in info["depends"])
-            f.write(f"{name}: {deps_str}\n")
-        else:
-            f.write(f"{name}: (none)\n")
+# README - gives partial info, deliberately omits XOR layer and CRC polynomial
+with open("/app/data/protocol.txt", "w") as f:
+    f.write("""TELEMETRY PROTOCOL SPECIFICATION (PARTIAL)
+==========================================
+Version: 2.7-CLASSIFIED
 
-# File 3: conflicts.conf - INI-style conflict declarations
-with open("/app/data/conflicts.conf", "w") as f:
-    f.write("[conflicts]\n")
-    f.write("# Packages listed on same line cannot coexist\n")
-    f.write("# Resolution: first installed wins, later conflicting packages are skipped\n")
-    f.write("#\n")
-    written_conflicts = set()
-    for name in sorted(packages.keys()):
-        for conflict in packages[name]["conflicts"]:
-            pair = tuple(sorted([name, conflict]))
-            if pair not in written_conflicts:
-                f.write(f"{pair[0]} <-> {pair[1]}\n")
-                written_conflicts.add(pair)
+HEADER (8 bytes):
+  Bytes 0-3: Magic "SMLG"
+  Bytes 4-5: Record count (big-endian unsigned 16-bit)
+  Byte 6: Number of channels
+  Byte 7: Flags (reserved)
 
-# File 4: resolver.conf - The resolution algorithm specification
-with open("/app/data/resolver.conf", "w") as f:
-    f.write("""[resolver]
-# Package Resolution Algorithm v3.2.1
-# 
-# The resolver installs packages iteratively:
-# 1. Identify all packages whose dependencies are fully satisfied
-#    by the set of already-installed packages.
-# 2. Among candidates, exclude any that conflict with installed packages.
-#    Conflicting packages are permanently skipped.
-# 3. Select the next package to install using this priority:
-#    a. Lowest tier number (tier 1 = most critical, tier 5 = optional)
-#    b. On tier tie: highest version wins (IMPORTANT: epoch-aware comparison!)
-#    c. On version tie: alphabetically first package name wins
-# 4. Install the selected package and repeat from step 1.
-# 5. Continue until no more packages can be installed.
-#
-# VERSION COMPARISON:
-# Versions may have an epoch prefix: "epoch:major.minor.patch"
-# If no epoch is specified, epoch defaults to 0.
-# Epochs are compared FIRST - a higher epoch ALWAYS wins regardless of
-# the major.minor.patch numbers. Example: "2:0.1.0" > "1:99.99.99"
-#
-# VIRTUAL PROVIDES:
-# A dependency on "virtual-X" is satisfied if ANY installed package
-# declares "provides: virtual-X" in the package database.
-# Virtual provides always satisfy version constraints (version is not checked
-# for virtual resolution).
-#
-# OUTPUT:
-# The install order is the sequence of package names, one per line.
-# Skipped packages (due to conflicts) should NOT appear in the output.
+BODY:
+  Records are packed at 19 bits each in a continuous bitstream.
+  The bitstream immediately follows the header with no padding.
+  
+  Each raw record contains:
+    - Bits [0:5]   = channel_id (6 bits, unsigned)
+    - Bits [6:10]  = state_delta (5 bits, signed 2's complement)
+    - Bits [11:18] = integrity_check (8 bits)
 
-algorithm_version = 3
-epoch_aware = true
-virtual_resolution = true
-conflict_mode = first_wins
+  IMPORTANT: Records in the bitstream are scrambled with a rolling
+  XOR cipher. Each 19-bit record is XOR'd with a 19-bit key that
+  changes after every record. The next key is derived from the
+  current record's unscrambled bits by rotating left 7 positions
+  and XOR'ing with a fixed mask.
+
+SYNC MARKERS:
+  A 19-bit synchronization pattern (0x55555) appears between
+  records at regular intervals. Sync markers are NOT scrambled
+  and do NOT participate in key feedback.
+
+INTEGRITY CHECK:
+  Valid records have a correct 8-bit integrity check computed
+  over the 11 data bits (channel_id + state_delta). Records
+  with invalid checks are corrupted and must be skipped.
+  The check algorithm is CRC-8 with a non-standard polynomial
+  (no init value, no final XOR).
+
+INITIAL STATE:
+  All channel states begin at 0 and update modulo 256.
+
+OUTPUT:
+  /app/output/channel_states.txt - one decimal value per line
+  for channels 0 through 63 (64 lines total).
 """)
 
-# File 5: Write the reference answer
+# Write reference answer
 os.makedirs("/var/lib/tbench", exist_ok=True)
 reference = {
-    "install_order": install_order,
-    "skipped": sorted(skipped_pkgs),
-    "total_installed": len(install_order),
-    "total_skipped": len(skipped_pkgs),
+    "channel_states": channel_states,
+    "num_valid": sum(1 for _, _, c in records if not c),
+    "num_corrupt": sum(1 for _, _, c in records if c),
 }
 
 with open("/var/lib/tbench/.reference.json", "w") as f:
     json.dump(reference, f, indent=2)
 
-# Print summary
-print(f"Generated package database with {len(packages)} packages")
-print(f"Install order: {len(install_order)} packages")
-print(f"Skipped (conflicts): {len(skipped_pkgs)} packages: {sorted(skipped_pkgs)}")
+print(f"Generated {NUM_RECORDS} records ({sum(1 for _,_,c in records if not c)} valid, {sum(1 for _,_,c in records if c)} corrupt)")
+print(f"Bitstream: {len(bitstream)} bits = {len(raw_bytes)} bytes")
+print(f"Channel states (first 8): {channel_states[:8]}")
 print(f"Reference written to /var/lib/tbench/.reference.json")

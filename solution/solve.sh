@@ -3,204 +3,114 @@ cat > /app/solver.py << 'PYTHON'
 import struct
 import os
 
-def parse_version(v):
-    """Parse version string into comparable tuple (epoch, major, minor, patch)."""
-    if ':' in v:
-        epoch_str, rest = v.split(':', 1)
-        epoch = int(epoch_str)
-    else:
-        epoch = 0
-        rest = v
-    parts = rest.split('.')
-    major = int(parts[0]) if len(parts) > 0 else 0
-    minor = int(parts[1]) if len(parts) > 1 else 0
-    patch = int(parts[2]) if len(parts) > 2 else 0
-    return (epoch, major, minor, patch)
+def int_to_bits(value, num_bits):
+    return [(value >> (num_bits - 1 - i)) & 1 for i in range(num_bits)]
 
-def version_compare(v1, v2):
-    """Compare two version strings. Returns -1, 0, or 1."""
-    t1 = parse_version(v1)
-    t2 = parse_version(v2)
-    if t1 < t2: return -1
-    if t1 > t2: return 1
-    return 0
+def bits_to_int(bits):
+    val = 0
+    for b in bits:
+        val = (val << 1) | b
+    return val
 
-def version_satisfies(installed_ver, constraint_op, constraint_ver):
-    """Check if installed_ver satisfies the version constraint."""
-    cmp = version_compare(installed_ver, constraint_ver)
-    if constraint_op == ">=": return cmp >= 0
-    if constraint_op == "<=": return cmp <= 0
-    if constraint_op == ">": return cmp > 0
-    if constraint_op == "<": return cmp < 0
-    if constraint_op == "==": return cmp == 0
-    if constraint_op == "!=": return cmp != 0
-    return False
+def crc8_from_int(data_11bit, poly):
+    crc = 0x00
+    for i in range(10, -1, -1):
+        bit = (data_11bit >> i) & 1
+        crc ^= (bit << 7)
+        if crc & 0x80:
+            crc = ((crc << 1) ^ poly) & 0xFF
+        else:
+            crc = (crc << 1) & 0xFF
+    return crc
 
-def read_packages_db(path):
-    """Read the binary package database."""
-    packages = {}
-    with open(path, "rb") as f:
-        magic = f.read(4)
-        assert magic == b"PKDB", f"Bad magic: {magic}"
-        count = struct.unpack("<I", f.read(4))[0]
-        for _ in range(count):
-            name_len = struct.unpack("<H", f.read(2))[0]
-            name = f.read(name_len).decode()
-            ver_len = struct.unpack("<H", f.read(2))[0]
-            version = f.read(ver_len).decode()
-            tier = struct.unpack("<B", f.read(1))[0]
-            size = struct.unpack("<I", f.read(4))[0]
-            num_provides = struct.unpack("<H", f.read(2))[0]
-            provides = []
-            for _ in range(num_provides):
-                prov_len = struct.unpack("<H", f.read(2))[0]
-                provides.append(f.read(prov_len).decode())
-            packages[name] = {
-                "version": version,
-                "tier": tier,
-                "installed_size": size,
-                "provides": provides,
-                "depends": [],
-                "conflicts": [],
-            }
-    return packages
+def next_key(raw_int):
+    rotated = ((raw_int << 7) | (raw_int >> 12)) & 0x7FFFF
+    return rotated ^ 0x35A1F
 
-def read_dependencies(path, packages):
-    """Read dependencies.txt and populate package dependencies."""
-    with open(path, "r") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if ": " not in line:
-                continue
-            pkg_name, deps_str = line.split(": ", 1)
-            if deps_str == "(none)":
-                continue
-            if pkg_name not in packages:
-                continue
-            # Parse deps: "dep1 (>= ver1), dep2 (>= ver2), ..."
-            deps = []
-            for dep_part in deps_str.split("), "):
-                dep_part = dep_part.strip().rstrip(")")
-                if " (" in dep_part:
-                    dep_name, constraint = dep_part.split(" (", 1)
-                    parts = constraint.split()
-                    if len(parts) >= 2:
-                        op = parts[0]
-                        ver = parts[1]
-                        deps.append((dep_name.strip(), op, ver))
-                else:
-                    deps.append((dep_part.strip(), ">=", "0.0.0"))
-            packages[pkg_name]["depends"] = deps
-
-def read_conflicts(path, packages):
-    """Read conflicts.conf and populate package conflicts."""
-    with open(path, "r") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#") or line.startswith("["):
-                continue
-            if " <-> " in line:
-                parts = line.split(" <-> ")
-                if len(parts) == 2:
-                    pkg1 = parts[0].strip()
-                    pkg2 = parts[1].strip()
-                    if pkg1 in packages:
-                        packages[pkg1]["conflicts"].append(pkg2)
-                    if pkg2 in packages:
-                        packages[pkg2]["conflicts"].append(pkg1)
-
-def resolve(packages):
-    """Run the package resolution algorithm."""
-    # Build virtual provides map
-    virtual_map = {}  # virtual_name -> set of provider packages
-    for pkg_name, info in packages.items():
-        for virt in info["provides"]:
-            if virt not in virtual_map:
-                virtual_map[virt] = set()
-            virtual_map[virt].add(pkg_name)
-
-    installed = []
-    installed_set = set()
-    pending = set(packages.keys())
-    skipped = set()
-
-    while pending:
-        installable = []
-        for pkg in sorted(pending):
-            if pkg in skipped:
-                continue
-            info = packages[pkg]
-
-            # Check conflicts with already installed packages
-            has_conflict = False
-            for conflict in info["conflicts"]:
-                if conflict in installed_set:
-                    has_conflict = True
-                    break
-            if has_conflict:
-                skipped.add(pkg)
-                continue
-
-            # Check all dependencies are satisfied
-            deps_satisfied = True
-            for dep_name, dep_op, dep_ver in info["depends"]:
-                if dep_name in installed_set:
-                    # Direct dependency - check version
-                    if not version_satisfies(packages[dep_name]["version"], dep_op, dep_ver):
-                        deps_satisfied = False
-                        break
-                elif dep_name in virtual_map:
-                    # Virtual dependency - check if any provider is installed
-                    found = False
-                    for provider in virtual_map[dep_name]:
-                        if provider in installed_set:
-                            found = True
-                            break
-                    if not found:
-                        deps_satisfied = False
-                        break
-                else:
-                    # Dependency not available at all
-                    deps_satisfied = False
-                    break
-
-            if deps_satisfied:
-                installable.append(pkg)
-
-        if not installable:
-            break
-
-        # Sort: lowest tier, then highest version (epoch-aware), then alphabetical
-        def sort_key(pkg):
-            info = packages[pkg]
-            ver_tuple = parse_version(info["version"])
-            neg_ver = tuple(-x for x in ver_tuple)
-            return (info["tier"], neg_ver, pkg)
-
-        installable.sort(key=sort_key)
-        chosen = installable[0]
-
-        installed.append(chosen)
-        installed_set.add(chosen)
-        pending.remove(chosen)
-
-    return installed
+def decode_signed_5bit(val):
+    if val & 0x10:
+        return val - 32
+    return val
 
 def main():
-    packages = read_packages_db("/app/data/packages.db")
-    read_dependencies("/app/data/dependencies.txt", packages)
-    read_conflicts("/app/data/conflicts.conf", packages)
+    with open("/app/data/telemetry.bin", "rb") as f:
+        data = f.read()
 
-    install_order = resolve(packages)
+    assert data[:4] == b"SMLG"
+    num_records = struct.unpack(">H", data[4:6])[0]
+    num_channels = data[6]
+
+    body_bits = []
+    for byte in data[8:]:
+        body_bits.extend(int_to_bits(byte, 8))
+
+    RECORD_BITS = 19
+    SYNC_PATTERN = 0x55555
+
+    # Extract first 10 scrambled record chunks
+    chunks = [bits_to_int(body_bits[r*RECORD_BITS:(r+1)*RECORD_BITS]) for r in range(10)]
+
+    # Discover CRC polynomial and initial XOR key
+    best_poly = None
+    best_key0 = None
+    best_valid_count = 0
+
+    for poly in range(256):
+        crc_table = [crc8_from_int(d, poly) for d in range(2048)]
+
+        for d0 in range(2048):
+            raw0 = (d0 << 8) | crc_table[d0]
+            k0 = chunks[0] ^ raw0
+
+            valid_count = 1
+            key = next_key(raw0)
+
+            for r in range(1, 10):
+                raw_r = chunks[r] ^ key
+                data_r = (raw_r >> 8) & 0x7FF
+                crc_r = raw_r & 0xFF
+                if crc_table[data_r] == crc_r:
+                    valid_count += 1
+                key = next_key(raw_r)
+
+            if valid_count >= 7 and valid_count > best_valid_count:
+                best_valid_count = valid_count
+                best_poly = poly
+                best_key0 = k0
+
+    # Decode all records
+    channel_states = [0] * num_channels
+    pos = 0
+    rolling_key = best_key0
+    records_processed = 0
+
+    while records_processed < num_records and pos + RECORD_BITS <= len(body_bits):
+        chunk_int = bits_to_int(body_bits[pos:pos + RECORD_BITS])
+        if chunk_int == SYNC_PATTERN:
+            pos += RECORD_BITS
+            continue
+
+        raw_int = chunk_int ^ rolling_key
+        data_11 = (raw_int >> 8) & 0x7FF
+        crc_val = raw_int & 0xFF
+        expected_crc = crc8_from_int(data_11, best_poly)
+
+        if expected_crc == crc_val:
+            channel_id = (data_11 >> 5) & 0x3F
+            delta_raw = data_11 & 0x1F
+            delta = decode_signed_5bit(delta_raw)
+            channel_states[channel_id] = (channel_states[channel_id] + delta) % 256
+
+        rolling_key = next_key(raw_int)
+        records_processed += 1
+        pos += RECORD_BITS
 
     os.makedirs("/app/output", exist_ok=True)
-    with open("/app/output/install_order.txt", "w") as f:
-        for pkg in install_order:
-            f.write(pkg + "\n")
+    with open("/app/output/channel_states.txt", "w") as f:
+        for state in channel_states:
+            f.write(f"{state}\n")
 
-    print(f"Resolved {len(install_order)} packages")
+    print(f"Decoded {records_processed} records, poly={hex(best_poly)}, key0={hex(best_key0)}")
 
 if __name__ == "__main__":
     main()

@@ -1,29 +1,25 @@
-# Broken Package Resolver
+# State Machine Telemetry Recovery
 
-A package manager's resolver crashed, leaving its database files. Reconstruct the correct installation order.
+A telemetry recorder captured state transitions for 64 parallel channels into a binary log using a custom protocol. The file is at `/app/data/telemetry.bin`. A partial protocol description is in `/app/data/protocol.txt`.
 
-## Data Files
+## What you know
 
-Located in `/app/data/`:
+- Records are 19 bits each, packed in a continuous bitstream (not byte-aligned)
+- Each record contains a channel ID, signed delta, and integrity check
+- Records are XOR-scrambled with a rolling key that evolves after each record
+- Some records (~15%) are corrupted and must be skipped
+- Sync markers appear periodically and are not scrambled
 
-1. **`packages.db`** — Binary database: 4-byte magic `PKDB`, 4-byte LE count, then per package:
-   - 2-byte LE name length, name, 2-byte LE version length, version, 1-byte tier, 4-byte LE size
-   - 2-byte LE provides count, then per provide: 2-byte LE length, name
+## What you must discover
 
-2. **`dependencies.txt`** — Format: `package: dep1 (>= version), dep2 (>= version), ...`
+- The initial value of the XOR key
+- The CRC-8 polynomial used for integrity checks
+- How to distinguish valid records from corrupt ones
 
-3. **`conflicts.conf`** — Mutual exclusions: `pkg1 <-> pkg2`
+## Channel state tracking
 
-4. **`resolver.conf`** — Full algorithm documentation.
+Each channel starts at state 0. For each valid (non-corrupt) record, add the signed delta to that channel's state, wrapping modulo 256. The rolling key must be updated for ALL records (valid or corrupt) to maintain synchronization.
 
-## Task
+## Output
 
-Implement the resolution algorithm from `resolver.conf`. Write output to `/app/output/install_order.txt` — one package name per line, in exact install order. Only include successfully installed packages.
-
-## Key Rules
-
-- **Epoch versioning**: format `[epoch:]major.minor.patch`. No epoch means epoch 0. Epochs dominate: `2:0.1.0` > `1:99.99.99`.
-- **Virtual provides**: dependency on `virtual-X` satisfied if any installed package declares it in provides. Version not checked for virtuals.
-- **Iterative resolution**: one package per step. Priority: lowest tier → highest version (epoch-aware) → alphabetical name.
-- **Conflicts**: first-installed-wins; conflicting packages permanently skipped.
-- **Deadlocks**: packages with unsatisfiable deps are never installed.
+Write the final state of each channel (0 through 63) as decimal integers, one per line, to `/app/output/channel_states.txt` (64 lines total).

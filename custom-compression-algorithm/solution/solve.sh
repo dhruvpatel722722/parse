@@ -2,7 +2,7 @@
 # Oracle solution: recovers records from records.dat via known-plaintext attack.
 mkdir -p /app/output
 
-cat > /app/_solve.py << 'PYEOF'
+cat > /app/recover.py << 'PYEOF'
 import struct, json, os, hashlib, re, itertools
 
 os.makedirs("/app/output", exist_ok=True)
@@ -229,4 +229,4 @@ print(f"Successfully recovered {N} records")
 PYEOF
 
 
-python3 /app/_solve.py
+python3 /app/recover.py
